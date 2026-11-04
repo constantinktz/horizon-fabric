@@ -10,6 +10,7 @@ pub mod chunk;
 pub mod connection;
 pub mod crypto;
 pub mod entity_data;
+pub mod fabric;
 pub mod frame;
 pub mod hash_ops;
 pub mod ids;

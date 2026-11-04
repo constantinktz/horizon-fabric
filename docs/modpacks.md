@@ -293,6 +293,9 @@ How the game loads them, without touching vanilla's path:
   these paths.
 - Multiplayer works when the server and its players run the same content mods: a client whose
   mods add different blocks, items, effects, entity types or menus is refused when it joins.
+  A Fabric server whose mods only add entries Horizon can play without their code (attributes,
+  menus, their own registries) is joined through Fabric API's registry sync
+  ([fabric-servers.md](fabric-servers.md)).
 - Not in 0.2: worlds opened without a mod they used (vanilla turns unknown blocks into air; we
   will ask first), vanilla ids redefined by a mod (refused).
 

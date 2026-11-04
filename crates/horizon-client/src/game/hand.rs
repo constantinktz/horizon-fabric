@@ -403,6 +403,10 @@ impl Game<'_> {
         }
         if self.player.as_ref().is_some_and(|p| !p.ground.on_ground) {
             speed /= 5.0;
+            // A Fabric server's Vehicle Upgrade lets riders mine at ground speed.
+            if let Some(factor) = self.airborne_mining_factor() {
+                speed *= factor;
+            }
         }
         speed / hardness / if harvest { 30.0 } else { 100.0 }
     }

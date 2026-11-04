@@ -117,6 +117,10 @@ pub struct Dynamic {
     pub dialog_tags: HashMap<String, Vec<i32>>,
     /// The peer confirmed the native component registry identity.
     pub custom_components: bool,
+    /// A Fabric server's id tables of the registries its mods add to
+    /// (`fabric:registry/sync`): they replace the built-in ones while
+    /// connected, as a Fabric client remaps its registries.
+    pub fabric: HashMap<String, Ids>,
 }
 impl Dynamic {
     /// The dialog tags of a `ClientboundUpdateTagsPacket`.

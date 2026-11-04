@@ -475,6 +475,9 @@ pub(super) struct Remote {
     pub attachments: HashMap<Holder, Attachments>,
     /// The server samples far terrain for us, this far at most (`lod_net`).
     pub far_terrain: Option<horizon_client::lod_net::Offer>,
+    /// The player's synced attributes a Fabric server's mods add, by name
+    /// (`remote_fabric.rs`).
+    pub(super) mod_attributes: HashMap<String, f64>,
     pub(super) builtin: Arc<Builtin>,
     lang: Arc<Language>,
     pub(super) registries: Arc<Dynamic>,
@@ -1006,6 +1009,7 @@ impl Game<'_> {
             mod_net: false,
             attachments: HashMap::new(),
             far_terrain: None,
+            mod_attributes: HashMap::new(),
             builtin,
             status: lang
                 .get("connect.connecting")
@@ -2117,6 +2121,17 @@ impl Game<'_> {
             let column = r.chunk_format.layout();
             r.chunk_format =
                 Arc::new(ChunkFormat::new(&r.dimension, biomes, bits).in_column(column));
+            // A Fabric server's tables number its mods' entries (an attribute,
+            // a menu type) after the vanilla ones: they hold for the rest of
+            // the connection, as a Fabric client's remap does, also through a
+            // reconfiguration that doesn't sync them again.
+            if !registries.fabric.is_empty() {
+                let mut builtin = (*r.builtin).clone();
+                for (name, ids) in &registries.fabric {
+                    builtin.registries.insert(name.clone(), ids.clone());
+                }
+                r.builtin = Arc::new(builtin);
+            }
             r.registries = registries;
         }
     }
@@ -4227,6 +4242,7 @@ impl Game<'_> {
                 if let Some(pl) = self.player.as_mut() {
                     horizon_client::lan::attributes::apply(&mut pl.attributes, &p.values);
                 }
+                self.remote_mod_attributes(&p.values);
                 self.apply_remote_health();
             }
             C::UpdateAttributes(p) => self.remote_mob_attributes(p.id, &p.values),
@@ -10597,7 +10613,7 @@ fn skin_entries(
 /// `AttributeInstance.calculateValue` before the attribute's range: the base,
 /// `ADD_VALUE`s, then `ADD_MULTIPLIED_BASE`s of that, then each
 /// `ADD_MULTIPLIED_TOTAL`.
-fn snapshot_value(s: &play::AttributeSnapshot) -> f64 {
+pub(super) fn snapshot_value(s: &play::AttributeSnapshot) -> f64 {
     let amounts = |op: i32| {
         s.modifiers
             .iter()

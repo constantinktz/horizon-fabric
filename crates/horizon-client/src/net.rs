@@ -11,6 +11,7 @@ use horizon_protocol::{
     PROTOCOL_VERSION,
     connection::{ConnReader, ConnWriter, Connection, Counters},
     crypto::{generate_secret, offline_uuid, server_hash},
+    fabric,
     packets::{Empty, configuration as cfg, handshake, login, play},
     registry::Dynamic,
     rsa::RsaPublicKey,
@@ -946,6 +947,56 @@ fn configure(
                     )),
                 }))?;
             }
+            // A Fabric server: register before the ping it sent next is
+            // answered, or it takes this client for a vanilla one and refuses
+            // it when its mods add registry entries (horizon_protocol::fabric).
+            cfg::Clientbound::CustomPayload(p) if p.channel == fabric::REGISTER => {
+                let server = fabric::decode_channels(&p.data)
+                    .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
+                if fabric::is_fabric_server(&server) {
+                    reply(custom(
+                        fabric::REGISTER,
+                        fabric::encode_channels(&fabric::CLIENT_CHANNELS),
+                    ))?;
+                }
+            }
+            cfg::Clientbound::CustomPayload(p) if p.channel == fabric::VERSION => {
+                let versions = fabric::decode_version(&p.data)
+                    .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
+                if fabric::negotiate(&versions).is_none() {
+                    return Err(Reason::keyed_arg(
+                        "horizon.multiplayer.fabric_unsupported",
+                        lang,
+                        fabric::VERSION,
+                    ));
+                }
+                reply(custom(
+                    fabric::VERSION,
+                    fabric::encode_version(&[fabric::COMMON_VERSION]),
+                ))?;
+            }
+            // No play channels: the server's mods then send nothing of their own.
+            cfg::Clientbound::CustomPayload(p) if p.channel == fabric::COMMON_REGISTER => {
+                reply(custom(
+                    fabric::COMMON_REGISTER,
+                    fabric::encode_common_register(fabric::COMMON_VERSION, fabric::PLAY, &[]),
+                ))?;
+            }
+            cfg::Clientbound::CustomPayload(p) if p.channel == fabric::REGISTRY_SYNC => {
+                let synced = fabric::decode_registry_sync(&p.data)
+                    .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
+                let builtin = horizon_protocol::registry::Builtin::find(resources)
+                    .and_then(|path| horizon_protocol::registry::Builtin::load(&path).ok())
+                    .ok_or_else(|| Reason::plain("registries.json is missing"))?;
+                registries.fabric = fabric::remap(&builtin, &synced).map_err(|namespaces| {
+                    Reason::keyed_arg(
+                        "horizon.multiplayer.fabric_unsupported",
+                        lang,
+                        &namespaces.join(", "),
+                    )
+                })?;
+                reply(custom(fabric::REGISTRY_SYNC_COMPLETE, Vec::new()))?;
+            }
             cfg::Clientbound::CustomPayload(p) => {
                 // Horizon servers use the client brand to negotiate their extensions.
                 // Announce those only after the server identifies itself as Horizon.
@@ -1043,6 +1094,14 @@ fn receive_brand(payload: &cfg::CustomPayload, send: &Sender<Event>) {
     {
         let _ = send.send(Event::FarTerrain(offer));
     }
+}
+
+/// A configuration-phase custom payload.
+fn custom(channel: &str, data: Vec<u8>) -> cfg::Serverbound {
+    cfg::Serverbound::CustomPayload(cfg::CustomPayload {
+        channel: channel.into(),
+        data,
+    })
 }
 
 /// `ClientBrandRetriever.getClientModName`: vanilla's default client brand.
