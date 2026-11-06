@@ -478,6 +478,8 @@ pub(super) struct Remote {
     /// The player's synced attributes a Fabric server's mods add, by name
     /// (`remote_fabric.rs`).
     pub(super) mod_attributes: HashMap<String, f64>,
+    /// Whether the player was told a Fabric server's mod content was skipped.
+    pub(super) fabric_unreadable_told: bool,
     /// The synced attachments a Fabric server sent (`remote_fabric_attach.rs`).
     pub(super) fabric_attachments: super::remote_fabric_attach::FabricAttachments,
     pub(super) builtin: Arc<Builtin>,
@@ -1015,6 +1017,7 @@ impl Game<'_> {
             attachments: HashMap::new(),
             far_terrain: None,
             mod_attributes: HashMap::new(),
+            fabric_unreadable_told: false,
             fabric_attachments: Default::default(),
             builtin,
             status: lang
@@ -1995,6 +1998,7 @@ impl Game<'_> {
                             log::warn!("Horizon: skipped undecodable packet {e}");
                         }
                     }
+                    self.remote_fabric_unreadable();
                 }
                 Event::Disconnected {
                     reason,
@@ -2127,8 +2131,18 @@ impl Game<'_> {
         if let Some(r) = self.remote.as_mut() {
             let bits = ceil_log2(biomes.len());
             let column = r.chunk_format.layout();
-            r.chunk_format =
-                Arc::new(ChunkFormat::new(&r.dimension, biomes, bits).in_column(column));
+            // A Fabric server's mod block states, kept through a
+            // reconfiguration that doesn't sync again.
+            let modded = registries
+                .fabric_bounds
+                .and_then(|b| b.block_states)
+                .map(|first| first as u32)
+                .or(r.chunk_format.modded_states());
+            r.chunk_format = Arc::new(
+                ChunkFormat::new(&r.dimension, biomes, bits)
+                    .in_column(column)
+                    .with_modded_states(modded),
+            );
             // A Fabric server's tables number its mods' entries (an attribute,
             // a menu type) after the vanilla ones: they hold for the rest of
             // the connection, as a Fabric client's remap does, also through a
@@ -2540,7 +2554,7 @@ impl Game<'_> {
         }
     }
     fn set_block(&mut self, pos: [i32; 3], state: i32) {
-        let state = BlockStateId(state.max(0) as u32);
+        let state = BlockStateId(self.placed_state(state));
         let previous = self.world.block(pos[0], pos[1], pos[2]);
         if self.world.loaded(pos[0], pos[2])
             && self.world.set(pos[0], pos[1], pos[2], state).is_ok()
@@ -3326,7 +3340,14 @@ impl Game<'_> {
             // ClientPacketListener.handleLevelEvent: a global one is heard
             // from anywhere (ClientLevel.globalLevelEvent).
             C::LevelEvent(p) if p.global => self.global_level_event_sound(p.kind, p.pos),
-            C::LevelEvent(p) => self.level_event_at(p.kind, p.pos, p.data),
+            C::LevelEvent(p) => {
+                // LevelEvent's block break and brush effects carry a state id.
+                let data = match p.kind {
+                    2001 | 3008 => self.placed_state(p.data) as i32,
+                    _ => p.data,
+                };
+                self.level_event_at(p.kind, p.pos, data)
+            }
             C::LevelParticles(p) => self.remote_level_particles(&p),
             C::Explode(p) => self.remote_explode(&p),
             C::Sound(p) => {

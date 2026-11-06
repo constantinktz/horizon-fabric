@@ -781,6 +781,8 @@ fn run(
     // What this connection negotiated with a Fabric server's particles
     // module: this thread decodes its packets until `run` returns.
     let _particles = fabric::particles::Scope::new();
+    // And where a Fabric server's mod ids start (fabric::state_ids).
+    let _bounds = fabric::state_ids::Scope::new();
     let registries = configure(
         &mut reader,
         shared_writer,
@@ -1094,6 +1096,10 @@ fn configure(
                         &namespaces.join(", "),
                     )
                 })?;
+                // The mods' own ids past vanilla's read as unknown on this
+                // thread, which decodes the connection's packets.
+                registries.fabric_bounds = fabric::state_ids::Bounds::from_sync(&builtin, &synced);
+                fabric::state_ids::set(registries.fabric_bounds);
                 reply(custom(fabric::REGISTRY_SYNC_COMPLETE, Vec::new()))?;
             }
             cfg::Clientbound::CustomPayload(p) => {

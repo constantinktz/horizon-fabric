@@ -86,6 +86,10 @@ CI (`fabric-checks.yml`) runs the first, the protocol tests and the two tree che
 ## What's open
 
 The honest list lives in [fabric-servers.md](fabric-servers.md) and [fabric-api.md](fabric-api.md). The biggest:
-servers whose mods add blocks (every block state id from the network must be clamped first: chunks, `set_block`,
-entity data, particles, projectiles), mod data component types, Fabric's built-in custom ingredients, and the
-native-mod side of data attachments.
+drawing mod blocks and items as themselves (a content-mod port of the server's mods would give Horizon their state
+counts and models), reading mod data component values, Fabric's built-in custom ingredients, and the native-mod side
+of data attachments.
+
+A new place that reads a block state, item, component or particle id from the network must go through
+`horizon_protocol::adapter::ids` (or `fabric::state_ids::placed_state` where a block must stand): that is where a
+Fabric server's mod ids are turned into unknown ones.

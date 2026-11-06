@@ -147,19 +147,23 @@ fn apply(id: i32, pick: impl Fn(&Ids) -> Remap) -> i32 {
 
 /// An item id as read or about to be written on this thread.
 pub fn item(id: i32) -> i32 {
-    apply(id, |ids| ids.item)
+    // Then a Fabric server's mod entries past vanilla's read as unknown.
+    crate::fabric::state_ids::item(apply(id, |ids| ids.item))
 }
 /// A data component type id as read or about to be written on this thread.
 pub fn component(id: i32) -> i32 {
-    apply(id, |ids| ids.data_component_type)
+    // Then a Fabric server's mod entries past vanilla's read as unknown.
+    crate::fabric::state_ids::component(apply(id, |ids| ids.data_component_type))
 }
 /// A particle type id as read or about to be written on this thread.
 pub fn particle(id: i32) -> i32 {
-    apply(id, |ids| ids.particle_type)
+    // Then a Fabric server's mod entries past vanilla's read as unknown.
+    crate::fabric::state_ids::particle(apply(id, |ids| ids.particle_type))
 }
 /// A block state id as read or about to be written on this thread.
 pub fn block_state(id: i32) -> i32 {
-    apply(id, |ids| ids.block_state)
+    // Then a Fabric server's mod entries past vanilla's read as unknown.
+    crate::fabric::state_ids::block_state(apply(id, |ids| ids.block_state))
 }
 /// An entity type id as read or about to be written on this thread.
 pub fn entity_type(id: i32) -> i32 {

@@ -121,6 +121,9 @@ pub struct Dynamic {
     /// (`fabric:registry/sync`): they replace the built-in ones while
     /// connected, as a Fabric client remaps its registries.
     pub fabric: HashMap<String, Ids>,
+    /// Where that server's mod entries start in the registries packets
+    /// carry by raw id (`fabric::state_ids::Bounds`); `None` without mods there.
+    pub fabric_bounds: Option<crate::fabric::state_ids::Bounds>,
 }
 impl Dynamic {
     /// The dialog tags of a `ClientboundUpdateTagsPacket`.

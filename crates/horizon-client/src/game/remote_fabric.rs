@@ -7,11 +7,44 @@
 use super::Game;
 use horizon_protocol::packets::play;
 
+/// `state` as placed, with a Fabric server's mod states from `first` on.
+fn placed(state: i32, first: Option<u32>) -> u32 {
+    horizon_protocol::fabric::state_ids::placed_state(state.max(0) as u32, first)
+}
+
 /// Vehicle Upgrade's attribute (`ModRegistry.AIRBORNE_MINING_SPEED_ATTRIBUTE`):
 /// `RangedAttribute(0.2, 0, 20)`, synced.
 pub(super) const AIRBORNE_MINING_SPEED: &str = "vehicleupgrade:airborne_mining_speed";
 
 impl Game<'_> {
+    /// A block state id a packet places (a block update, a falling block, a
+    /// break effect): a Fabric server mod's stands as the placeholder
+    /// (`fabric::state_ids::PLACEHOLDER_STATE`), a negative one as air.
+    pub(super) fn placed_state(&self, state: i32) -> u32 {
+        let first = self
+            .remote
+            .as_ref()
+            .and_then(|r| r.chunk_format.modded_states());
+        placed(state, first)
+    }
+
+    /// A server mod's items, data components and particles can't be read
+    /// (`fabric::state_ids`): the packet that holds one is skipped. Said once
+    /// per connection, on the first such packet from a server with mods there.
+    pub(super) fn remote_fabric_unreadable(&mut self) {
+        let Some(r) = self.remote.as_mut() else {
+            return;
+        };
+        if r.registries.fabric_bounds.is_none() || r.fabric_unreadable_told {
+            return;
+        }
+        r.fabric_unreadable_told = true;
+        self.chat_line(
+            horizon_client::text::Text::tr("horizon.multiplayer.fabric_unreadable", &[]),
+            horizon_client::chat::ChatSource::Client,
+        );
+    }
+
     /// The player's own synced attributes that no vanilla attribute holds:
     /// their values, by the name the server's table gives their id.
     pub(super) fn remote_mod_attributes(&mut self, values: &[play::AttributeSnapshot]) {
@@ -60,6 +93,18 @@ fn airborne_factor(value: f64) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use super::placed;
+
+    #[test]
+    fn placed_states_from_a_fabric_servers_mods_are_stone() {
+        // 26.3's 35723 vanilla states: 35722 is the last (reports/blocks.json).
+        assert_eq!(placed(35722, Some(35723)), 35722);
+        assert_eq!(placed(35723, Some(35723)), 1);
+        assert_eq!(placed(i32::MAX, Some(35723)), 1);
+        assert_eq!(placed(-5, Some(35723)), 0);
+        assert_eq!(placed(40000, None), 40000);
+    }
+
     use super::*;
 
     fn snapshot(modifiers: Vec<play::AttributeModifier>) -> play::AttributeSnapshot {

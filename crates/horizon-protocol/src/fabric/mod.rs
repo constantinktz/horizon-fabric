@@ -48,13 +48,17 @@ pub const PLAY: &str = "play";
 /// client decodes block positions in block particle options.
 pub const CLIENT_CHANNELS: [&str; 4] =
     [VERSION, COMMON_REGISTER, REGISTRY_SYNC, particles::CHANNEL];
-/// The registries whose mod entries Horizon can't decode: their ids sit in
-/// chunk palettes and item stacks, where an unknown one breaks what follows.
-pub const STRICT: [&str; 4] = [
+/// The registries Horizon reads by raw id inside packets: chunk palettes
+/// (block states follow block raw ids), item stacks, their components and
+/// particles. A server's mod entries there are taken only when they all come
+/// after vanilla's ([`state_ids::appended`]): vanilla's ids stay Horizon's,
+/// and every id past them reads as unknown ([`state_ids::Bounds`]).
+pub const STRICT: [&str; 5] = [
     "minecraft:block",
     "minecraft:item",
     "minecraft:fluid",
     "minecraft:data_component_type",
+    "minecraft:particle_type",
 ];
 
 /// `AbstractChanneledNetworkAddon.MAX_CHANNELS`.
@@ -194,7 +198,8 @@ pub fn decode_registry_sync(data: &[u8]) -> Result<Vec<SyncedRegistry>> {
 /// The tables Horizon plays with after a registry sync, by registry: what a
 /// Fabric client's `RegistrySyncManager` remaps its own registries to. A
 /// vanilla entry numbered differently, or a mod entry in a [`STRICT`]
-/// registry, can't be played: the error lists the namespaces involved.
+/// registry before a vanilla one, can't be played: the error lists the
+/// namespaces involved.
 pub fn remap(
     builtin: &Builtin,
     synced: &[SyncedRegistry],
@@ -212,17 +217,20 @@ pub fn remap(
             match known.and_then(|k| k.id(name)) {
                 // The server moved a vanilla entry.
                 Some(ours) if ours != *id => unsupported.push(namespace_of(name).to_owned()),
-                Some(_) => {}
-                // A mod's entry in a registry Horizon decodes in bulk.
-                None if known.is_some() && STRICT.contains(&registry.id.as_str()) => {
-                    unsupported.push(namespace_of(name).to_owned())
-                }
-                None => {}
+                Some(_) | None => {}
             }
             if index >= names.len() {
                 names.resize(index + 1, String::new());
             }
             names[index] = name.clone();
+        }
+        // Mod entries after every vanilla one keep vanilla's ids and block
+        // state ids; the mods' own read as unknown.
+        if let Some(known) = known
+            && STRICT.contains(&registry.id.as_str())
+            && let Err(namespaces) = state_ids::appended(known, &registry.entries)
+        {
+            unsupported.extend(namespaces);
         }
         tables.insert(registry.id.clone(), Ids::from_names(names));
     }
@@ -353,6 +361,12 @@ mod tests {
                 "minecraft:block": {"entries": {
                     "minecraft:air": {"protocol_id": 0},
                     "minecraft:stone": {"protocol_id": 1}
+                }},
+                "minecraft:item": {"entries": {
+                    "minecraft:air": {"protocol_id": 0}
+                }},
+                "minecraft:data_component_type": {"entries": {
+                    "minecraft:custom_data": {"protocol_id": 0}
                 }}
             }"#,
         )
@@ -374,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn moved_vanilla_entries_and_mod_blocks_are_refused() {
+    fn moved_vanilla_entries_and_unplaceable_mod_entries_are_refused() {
         let moved = SyncedRegistry {
             id: "minecraft:attribute".into(),
             optional: false,
@@ -387,6 +401,47 @@ mod tests {
             remap(&builtin(), &[moved]).err(),
             Some(vec!["minecraft".into()])
         );
+        // A mod block where vanilla's stone was: every state after it moves.
+        let blocks = SyncedRegistry {
+            id: "minecraft:block".into(),
+            optional: false,
+            entries: vec![
+                ("minecraft:air".into(), 0),
+                ("copper_age:vent".into(), 1),
+                ("minecraft:stone".into(), 2),
+            ],
+        };
+        assert_eq!(
+            remap(&builtin(), &[blocks]).err(),
+            Some(vec!["copper_age".into(), "minecraft".into()])
+        );
+        // A server without stone.
+        let missing = SyncedRegistry {
+            id: "minecraft:block".into(),
+            optional: false,
+            entries: vec![("minecraft:air".into(), 0), ("copper_age:vent".into(), 2)],
+        };
+        assert_eq!(
+            remap(&builtin(), &[missing]).err(),
+            Some(vec!["minecraft".into()])
+        );
+        // A mod's component type in vanilla's range.
+        let components = SyncedRegistry {
+            id: "minecraft:data_component_type".into(),
+            optional: false,
+            entries: vec![
+                ("copper_age:charge".into(), 0),
+                ("minecraft:custom_data".into(), 1),
+            ],
+        };
+        assert_eq!(
+            remap(&builtin(), &[components]).err(),
+            Some(vec!["copper_age".into(), "minecraft".into()])
+        );
+    }
+
+    #[test]
+    fn mod_blocks_and_items_after_vanilla_are_taken() {
         let blocks = SyncedRegistry {
             id: "minecraft:block".into(),
             optional: false,
@@ -397,10 +452,23 @@ mod tests {
                 ("copper_age:pipe".into(), 3),
             ],
         };
-        assert_eq!(
-            remap(&builtin(), &[blocks]).err(),
-            Some(vec!["copper_age".into()])
-        );
+        let items = SyncedRegistry {
+            id: "minecraft:item".into(),
+            optional: false,
+            entries: vec![("minecraft:air".into(), 0), ("copper_age:wrench".into(), 1)],
+        };
+        let components = SyncedRegistry {
+            id: "minecraft:data_component_type".into(),
+            optional: false,
+            entries: vec![
+                ("minecraft:custom_data".into(), 0),
+                ("copper_age:charge".into(), 1),
+            ],
+        };
+        let tables = remap(&builtin(), &[blocks, items, components]).unwrap();
+        assert_eq!(tables["minecraft:block"].id("minecraft:stone"), Some(1));
+        assert_eq!(tables["minecraft:block"].name(3), Some("copper_age:pipe"));
+        assert_eq!(tables["minecraft:item"].name(1), Some("copper_age:wrench"));
     }
 
     #[test]
