@@ -460,8 +460,14 @@ impl Game<'_> {
         let ty = ParticleType::from_name(&name)?;
         Some(match &p.data {
             None => ParticleOptions::simple(ty),
-            Some(ParticleData::State(s)) => {
-                let pos = at.map(|v| v.floor() as i32);
+            // `TerrainParticle` tints with the block the particle spawns in;
+            // Fabric API's `TerrainParticleMixin` takes the block the server
+            // read the state from when it sent that position.
+            Some(ParticleData::State(s) | ParticleData::StateAt(s, _)) => {
+                let pos = match &p.data {
+                    Some(ParticleData::StateAt(_, from)) => *from,
+                    _ => at.map(|v| v.floor() as i32),
+                };
                 let (sprite, tint) = self
                     .particle_sprite(BlockStateId(*s as u32), pos)
                     .unwrap_or_else(|| ("block/stone".into(), 0xFFFFFF));

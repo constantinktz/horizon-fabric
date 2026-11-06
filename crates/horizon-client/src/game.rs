@@ -280,6 +280,8 @@ mod remote_camera;
 mod remote_chat;
 mod remote_chunks;
 mod remote_fabric;
+mod remote_fabric_attach;
+mod remote_fabric_menu;
 mod remote_mob_data;
 mod remote_mob_particles;
 mod remote_mob_use;
@@ -18553,6 +18555,8 @@ impl Game<'_> {
                     let steps = self.clock.advance(elapsed);
                     for _ in 0..steps {
                         let started = Instant::now();
+                        // Minecraft.tick's head: the client tick hooks run on menus and paused too.
+                        self.native_lifecycle_client_tick_start();
                         if self.title.is_none() && !self.pause {
                             horizon_client::spans::time("tick", || self.tick())?;
                             self.tick_ambience();
@@ -18564,6 +18568,7 @@ impl Game<'_> {
                         self.tick_chat_queue();
                         self.tick_music();
                         self.tick_sound_engine();
+                        self.native_lifecycle_client_tick_end();
                         self.clock.record(started.elapsed());
                         if let Some(report) = self.clock.take_sprint_report() {
                             self.sprint_report(&report);
@@ -18763,6 +18768,8 @@ impl Game<'_> {
     }
     /// The loop ended: close the pads' output, save the world, write the perf report.
     pub(super) fn shut_down(&mut self) {
+        // A quit that bypassed the close request (Cmd+Q, a headless stop) still stops the client.
+        self.native_lifecycle_client_stopping();
         self.pad_close_output();
         if let Err(e) = self.save_for_exit() {
             log::warn!("Horizon: failed to save the world on exit: {e}");

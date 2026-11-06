@@ -69,3 +69,32 @@ and `iteminteractions:item_storage_type` (optional). The headless client
 `horizon-ctl`, it rides a saddled horse (the server reports the attribute at 1.0), mines stone
 from it in 13 ticks against 16 on the ground, opens a chest, and walks with no decode error.
 Without the handshake the same server refuses it with the message above.
+
+## End to end
+
+`tools/fabric_e2e.py` runs the headless client against real Fabric servers and checks both sides'
+logs. It starts each server in a scratch folder (offline mode, `127.0.0.1`, a free port in
+26170-26199, its console fed through `tail -f`), with a log4j config that turns Fabric API's
+registry sync and networking loggers to DEBUG, so the server's own log says which registries it
+synced and what the client sent in configuration. It stops every process it started and prints a
+JSON summary.
+
+```sh
+python3 tools/fabric_e2e.py --profile minimal --profile vanilla-perfected --bin-dir target/fast
+```
+
+Profiles: `minimal` (Fabric Loader 0.19.5 and Fabric API 0.162.0+26.3, downloaded once into
+`.local/fabric-e2e/`, a flat world), `vanilla-perfected` (a copy of a prepared server folder,
+`--server-dir`; the source is never touched), and `modules` / `blocks` (minimal plus small Modrinth
+mods that exercise a module: Carry On for the attachment sync, Just Enough Breeding for the recipe
+sync, Scholar for extended menus, RebornCore for custom ingredients, Animal Feeding Trough for
+modded block states).
+
+Checks: joined, chunks received, the chat line and `/list` came back, no undecodable packet, no
+disconnect, the client answered `fabric:registry/sync/complete`, and one per Fabric API module
+(splitter, menu, recipe sync, ingredient sync, attachment sync, particles, state ids). A module
+check finds out from the server's mod jars (the Fabric API classes their code references) and the
+synced registries whether a mod exercises it, and says `skipped` when none does. A module a mod
+uses but Horizon doesn't take part in yet is `unsupported`; `--strict` makes that a failure. A
+server Horizon declines (`horizon.multiplayer.fabric_unsupported`) is `unsupported` too, not a
+failure.

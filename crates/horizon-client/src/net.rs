@@ -11,7 +11,10 @@ use horizon_protocol::{
     PROTOCOL_VERSION,
     connection::{ConnReader, ConnWriter, Connection, Counters},
     crypto::{generate_secret, offline_uuid, server_hash},
-    fabric,
+    fabric::{
+        self,
+        splitter::{Limits, Merger, Step, channels::Channels},
+    },
     packets::{Empty, configuration as cfg, handshake, login, play},
     registry::Dynamic,
     rsa::RsaPublicKey,
@@ -773,6 +776,11 @@ fn run(
     .map_err(e)?;
     let (mut reader, writer) = c.split();
     *shared_writer.lock().unwrap() = Some(writer);
+    // The play channels a Fabric server and this client exchange.
+    let mut channels = Channels::play();
+    // What this connection negotiated with a Fabric server's particles
+    // module: this thread decodes its packets until `run` returns.
+    let _particles = fabric::particles::Scope::new();
     let registries = configure(
         &mut reader,
         shared_writer,
@@ -781,6 +789,7 @@ fn run(
         send,
         cookies,
         resources,
+        &mut channels,
     )?;
     let _ = send.send(Event::Joined {
         registries: Arc::new(registries),
@@ -796,6 +805,7 @@ fn run(
         cookies,
         far,
         resources,
+        &mut channels,
     )
 }
 
@@ -808,11 +818,25 @@ fn receive_play(
     cookies: &Cookies,
     far: &crate::lod_net::Inbox,
     resources: &Path,
+    channels: &mut Channels,
 ) -> Result<Reason, Reason> {
+    // Fabric's packet merger: oversized payloads arrive split.
+    let mut merger = Merger::new(
+        horizon_protocol::ids::play::clientbound::CUSTOM_PAYLOAD,
+        Limits::fabric_clientbound_play(),
+    );
     loop {
         let (id, payload) = reader
             .recv()
             .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
+        let (id, payload) = match merger.feed(id, payload) {
+            Step::Packet { id, body } => (id, body),
+            Step::Held => continue,
+            Step::Dropped(e) => {
+                log::debug!("Fabric: dropped a split packet: {e}");
+                continue;
+            }
+        };
         let packet = match play::Clientbound::decode(id, &payload) {
             Ok(p) => p,
             Err(err) => {
@@ -846,6 +870,9 @@ fn receive_play(
                     let _ = w.send(&play::Serverbound::ConfigurationAcknowledged(Empty).encode());
                     configuring.store(true, Ordering::Relaxed);
                 }
+                // A new play session follows, with the channels it exchanges.
+                merger.clear();
+                channels.reconfigure();
                 let registries = configure(
                     reader,
                     shared_writer,
@@ -854,6 +881,7 @@ fn receive_play(
                     send,
                     cookies,
                     resources,
+                    channels,
                 )?;
                 let _ = send.send(Event::Reconfigured(Arc::new(registries)));
             }
@@ -889,6 +917,32 @@ fn receive_play(
             play::Clientbound::CustomPayload(p) if p.channel == crate::lod_net::CHANNEL => {
                 far.deliver(p.data);
             }
+            // The channels the server takes (Fabric's play addon); a client
+            // never answers them.
+            play::Clientbound::CustomPayload(p)
+                if p.channel == fabric::REGISTER
+                    || p.channel == fabric::splitter::channels::UNREGISTER =>
+            {
+                if let Err(e) = channels.receive(&p.channel, &p.data) {
+                    log::debug!("Fabric: a bad {} payload: {e}", p.channel);
+                }
+            }
+            // ClientPlayNetworkAddon.onServerReady: with the server's Login
+            // in, this client's play channels go out (none: nothing is sent).
+            play::Clientbound::Login(login) => {
+                if let Some(data) = channels.server_ready() {
+                    reply(play::Serverbound::CustomPayload(cfg::CustomPayload {
+                        channel: fabric::REGISTER.into(),
+                        data,
+                    }));
+                }
+                if send
+                    .send(Event::Packet(Box::new(play::Clientbound::Login(login))))
+                    .is_err()
+                {
+                    return Ok(Reason::plain("Disconnected"));
+                }
+            }
             other => {
                 if send.send(Event::Packet(Box::new(other))).is_err() {
                     return Ok(Reason::plain("Disconnected"));
@@ -908,9 +962,17 @@ fn configure(
     send: &Sender<Event>,
     cookies: &Cookies,
     resources: &Path,
+    channels: &mut Channels,
 ) -> Result<Dynamic, Reason> {
     let mut registries = Dynamic::default();
+    // Fabric's packet merger: a large registry sync arrives split.
+    let mut merger = Merger::new(
+        horizon_protocol::ids::configuration::clientbound::CUSTOM_PAYLOAD,
+        Limits::fabric_clientbound_configuration(),
+    );
     let mut content_verified = false;
+    // The channels a Fabric server receives (its `minecraft:register`).
+    let mut fabric_channels: Vec<String> = Vec::new();
     let reply = |p: cfg::Serverbound| -> Result<(), Reason> {
         match writer.lock().unwrap().as_mut() {
             Some(w) => w
@@ -923,6 +985,14 @@ fn configure(
         let (id, payload) = reader
             .recv()
             .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
+        let (id, payload) = match merger.feed(id, payload) {
+            Step::Packet { id, body } => (id, body),
+            Step::Held => continue,
+            Step::Dropped(e) => {
+                log::debug!("Fabric: dropped a split packet: {e}");
+                continue;
+            }
+        };
         match cfg::Clientbound::decode(id, &payload)
             .map_err(|e| Reason::plain(connection_lost(e, lang)))?
         {
@@ -954,11 +1024,18 @@ fn configure(
                 let server = fabric::decode_channels(&p.data)
                     .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
                 if fabric::is_fabric_server(&server) {
-                    reply(custom(
-                        fabric::REGISTER,
-                        fabric::encode_channels(&fabric::CLIENT_CHANNELS),
-                    ))?;
+                    // Asked for accepted attachments only when a native mod
+                    // reads some (fabric::attachment::accept).
+                    let mut announce = fabric::CLIENT_CHANNELS.to_vec();
+                    if !fabric::attachment::accepted().is_empty() {
+                        announce.push(fabric::attachment::ACCEPTED_CHANNEL);
+                    }
+                    reply(custom(fabric::REGISTER, fabric::encode_channels(&announce)))?;
+                    // The channels include fabric-particles-v1's: from now on
+                    // the server may send block positions in block particles.
+                    fabric::particles::negotiate();
                 }
+                fabric_channels.extend(server);
             }
             cfg::Clientbound::CustomPayload(p) if p.channel == fabric::VERSION => {
                 let versions = fabric::decode_version(&p.data)
@@ -975,12 +1052,34 @@ fn configure(
                     fabric::encode_version(&[fabric::COMMON_VERSION]),
                 ))?;
             }
-            // No play channels: the server's mods then send nothing of their own.
+            // The server's play channels; the answer names this client's
+            // (`channels::CLIENT_PLAY`), so the server's mods send nothing on
+            // any other.
             cfg::Clientbound::CustomPayload(p) if p.channel == fabric::COMMON_REGISTER => {
+                let answer = channels
+                    .receive_common_register(&p.data)
+                    .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
+                reply(custom(fabric::COMMON_REGISTER, answer))?;
+            }
+            // AttachmentSyncClient: the synced attachment types Horizon's
+            // native mods read; the server sends values of those only.
+            cfg::Clientbound::CustomPayload(p)
+                if p.channel == fabric::attachment::ACCEPTED_CHANNEL =>
+            {
+                let accepted = fabric::attachment::accepted();
                 reply(custom(
-                    fabric::COMMON_REGISTER,
-                    fabric::encode_common_register(fabric::COMMON_VERSION, fabric::PLAY, &[]),
+                    fabric::attachment::ACCEPTED_CHANNEL,
+                    fabric::attachment::accepted_payload(&accepted),
                 ))?;
+            }
+            // Which custom ingredients Horizon decodes: none, so the server
+            // sends each as the items it matches (fabric::ingredient).
+            cfg::Clientbound::CustomPayload(p) if p.channel == fabric::ingredient::CHANNEL => {
+                let version = fabric::ingredient::decode_query(&p.data)
+                    .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
+                if let Some(data) = fabric::ingredient::response(version) {
+                    reply(custom(fabric::ingredient::CHANNEL, data))?;
+                }
             }
             cfg::Clientbound::CustomPayload(p) if p.channel == fabric::REGISTRY_SYNC => {
                 let synced = fabric::decode_registry_sync(&p.data)
@@ -1021,7 +1120,12 @@ fn configure(
             cfg::Clientbound::SelectKnownPacks(_) => {
                 reply(cfg::Serverbound::SelectKnownPacks(cfg::SelectKnownPacks {
                     packs: vec![],
-                }))?
+                }))?;
+                // Fabric's recipe sync asks here; Horizon claims no serializer,
+                // so this sends nothing (fabric::recipe).
+                if let Some(data) = fabric::recipe::request(&fabric_channels) {
+                    reply(custom(fabric::recipe::SUPPORTED_SERIALIZERS, data))?;
+                }
             }
             cfg::Clientbound::UpdateEnabledFeatures(p) => {
                 let _ = send.send(Event::Features(p.features));
@@ -1484,6 +1588,7 @@ mod tests {
                 &Cookies::default(),
                 &crate::lod_net::Inbox::default(),
                 Path::new("."),
+                &mut Channels::play(),
             ));
         });
         let ended = result
@@ -1534,6 +1639,7 @@ mod tests {
                 &send,
                 &Cookies::default(),
                 &root,
+                &mut Channels::play(),
             )
         });
         let mut server = Connection::local(server);
@@ -1652,6 +1758,7 @@ mod tests {
                 &Cookies::default(),
                 &crate::lod_net::Inbox::default(),
                 Path::new("."),
+                &mut Channels::play(),
             )
         });
         let mut server = Connection::local(server);
@@ -1717,6 +1824,7 @@ mod tests {
                 &Cookies::default(),
                 &crate::lod_net::Inbox::default(),
                 Path::new("."),
+                &mut Channels::play(),
             )
         });
         let mut server = Connection::local(server);
@@ -1765,6 +1873,7 @@ mod tests {
                 &thread_cookies,
                 &crate::lod_net::Inbox::default(),
                 Path::new("."),
+                &mut Channels::play(),
             )
         });
         let mut server = Connection::local(server);

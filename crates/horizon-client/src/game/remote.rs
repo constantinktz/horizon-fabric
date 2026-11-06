@@ -478,6 +478,8 @@ pub(super) struct Remote {
     /// The player's synced attributes a Fabric server's mods add, by name
     /// (`remote_fabric.rs`).
     pub(super) mod_attributes: HashMap<String, f64>,
+    /// The synced attachments a Fabric server sent (`remote_fabric_attach.rs`).
+    pub(super) fabric_attachments: super::remote_fabric_attach::FabricAttachments,
     pub(super) builtin: Arc<Builtin>,
     lang: Arc<Language>,
     pub(super) registries: Arc<Dynamic>,
@@ -547,6 +549,9 @@ pub(super) struct Remote {
     /// A mod menu's extra data, kept for the `OpenScreen` of its window that
     /// follows (`horizon:menu_extra`).
     menu_extra: Option<horizon_protocol::menu_extra::Message>,
+    /// A mod's menu the server opened, until its slots show its shape
+    /// (remote_fabric_menu).
+    pub(super) fabric_menu: Option<super::remote_fabric_menu::PendingMenu>,
     entities: HashMap<i32, Tracked>,
     lerps: HashMap<i32, Lerp>,
     /// The minecarts the server moves with `ClientboundMoveMinecartPacket`
@@ -1010,6 +1015,7 @@ impl Game<'_> {
             attachments: HashMap::new(),
             far_terrain: None,
             mod_attributes: HashMap::new(),
+            fabric_attachments: Default::default(),
             builtin,
             status: lang
                 .get("connect.connecting")
@@ -1051,6 +1057,7 @@ impl Game<'_> {
             state_id: 0,
             use_target: None,
             menu_extra: None,
+            fabric_menu: None,
             entities: HashMap::new(),
             lerps: HashMap::new(),
             cart_lerps: HashMap::new(),
@@ -1952,6 +1959,7 @@ impl Game<'_> {
                     self.clear_waypoints();
                     if let Some(r) = self.remote.as_mut() {
                         r.attachments.clear();
+                        r.fabric_attachments.clear();
                         r.players.clear();
                         r.tab_players.clear();
                         r.listed.clear();
@@ -2300,6 +2308,8 @@ impl Game<'_> {
         if gone.is_empty() {
             return;
         }
+        // ClientChunkCache.drop: each loaded column is told while it is still there.
+        self.native_client_chunks_unloading(gone.iter());
         let freed = self.streaming.forget_columns(&mut self.world, gone);
         if let Some(lod) = &mut self.lod {
             for chunk in &freed {
@@ -2319,6 +2329,7 @@ impl Game<'_> {
                 Holder::BlockEntity([x, _, z]) => !gone.contains(&(x >> 4, z >> 4)),
                 _ => true,
             });
+            r.fabric_attachments.forget_columns(gone);
         }
         gone.clear();
     }
@@ -2489,6 +2500,7 @@ impl Game<'_> {
     fn forget_block_entity_attachments(&mut self, (x, y, z): (i32, i32, i32)) {
         if let Some(r) = self.remote.as_mut() {
             r.attachments.remove(&Holder::BlockEntity([x, y, z]));
+            r.fabric_attachments.forget_block_entity([x, y, z]);
         }
     }
     /// ClientLevel.setServerVerifiedBlockState: a block the client predicted keeps its
@@ -3096,6 +3108,12 @@ impl Game<'_> {
             C::CustomPayload(p) if p.channel == horizon_protocol::attachment_sync::CHANNEL => {
                 self.remote_attachment_sync(&p.data);
             }
+            // A Fabric server's synced data attachments.
+            C::CustomPayload(p)
+                if p.channel == horizon_protocol::fabric::attachment::SYNC_CHANNEL =>
+            {
+                self.remote_fabric_attachment_sync(&p.data);
+            }
             // A mod menu type's block and its mod's bytes, just before the
             // menu's `OpenScreen`.
             C::CustomPayload(p) if p.channel == horizon_protocol::menu_extra::CHANNEL => {
@@ -3107,6 +3125,10 @@ impl Game<'_> {
                     }
                     Err(e) => log::debug!("Horizon: a bad menu extra payload: {e}"),
                 }
+            }
+            // Fabric API's extended menu, sent in place of its `OpenScreen`.
+            C::CustomPayload(p) if p.channel == horizon_protocol::fabric::menu::OPEN_SCREEN => {
+                self.remote_fabric_open_screen(&p.data);
             }
             // The server's recipes its native mods asked to send.
             C::CustomPayload(p) if p.channel == horizon_client::lan::recipes::CONTENT_CHANNEL => {
@@ -3126,6 +3148,7 @@ impl Game<'_> {
                 if let Some(r) = self.remote.as_mut() {
                     r.reconfiguring = None;
                     r.attachments.clear();
+                    r.fabric_attachments.clear();
                 }
                 // handleLogin makes a new MultiPlayerGameMode (carried index 0) and a
                 // new LocalPlayer (slot 0, no effects, riding nothing: the server
@@ -3190,6 +3213,7 @@ impl Game<'_> {
                     }
                 }
                 let dimension_changed = self.dim != Dim::from_id(&p.spawn.dimension);
+                self.fabric_attachments_respawn(dimension_changed, p.keep);
                 let died = self.screen == Screen::Dead
                     || self
                         .player
@@ -3364,6 +3388,8 @@ impl Game<'_> {
                 if let Some(r) = self.remote.as_mut() {
                     // A new entity looks its PlayerInfo up afresh.
                     r.level_player_textures.remove(&p.id);
+                    // And has no Fabric attachments: the server syncs them after it.
+                    r.fabric_attachments.forget_entity(p.id);
                     if kind == "minecraft:player" {
                         r.level_players.insert(p.id, p.uuid);
                         // createEntityFromPacket: the player takes the profile of its list entry.
@@ -3423,6 +3449,7 @@ impl Game<'_> {
                         r.level_player_names.remove(&id);
                         r.level_player_textures.remove(&id);
                         r.attachments.remove(&Holder::Entity(id as u32));
+                        r.fabric_attachments.forget_entity(id);
                     }
                     self.remove_entity(id);
                 }
@@ -4458,6 +4485,7 @@ impl Game<'_> {
                 }
             }
             C::ContainerSetContent(p) => {
+                self.remote_unknown_menu_content(p.container, p.items.len());
                 self.remote_menu_state(p.container, p.state);
                 for (slot, item) in p.items.iter().enumerate() {
                     let stack = self.to_stack(item);
@@ -4553,13 +4581,17 @@ impl Game<'_> {
                 }
             }
             C::OpenScreen(p) => self.remote_open_screen(p),
-            C::MountScreenOpen(p) => self.remote_open_mount(p),
+            C::MountScreenOpen(p) => {
+                self.remote_unknown_menu_forget();
+                self.remote_open_mount(p)
+            }
             C::RecipeBookAdd(p) => self.remote_recipe_book_add(p),
             C::RecipeBookRemove(p) => self.remote_recipe_book_remove(p),
             C::RecipeBookSettings(p) => self.remote_recipe_book_settings(p),
             C::PlaceGhostRecipe(p) => self.remote_ghost_recipe(p),
             C::MerchantOffers(p) => self.remote_merchant_offers(p),
             C::ContainerClose(_) => {
+                self.remote_unknown_menu_forget();
                 // `LocalPlayer.clientSideCloseContainer` sets the screen to
                 // null, including dialogs and WaitingForResponseScreen. This
                 // differs from clearDialog, which restores the parent screen.
@@ -9409,7 +9441,7 @@ impl Game<'_> {
         self.send(S::ContainerClose(play::ContainerClose { container: id }));
         self.remote_close_local();
     }
-    fn remote_close_local(&mut self) {
+    pub(super) fn remote_close_local(&mut self) {
         // `Gui.setScreen` clears the focus of the screen it takes down: the
         // container's keyboard focus must not outlive it (a Tab bound to the
         // inventory moves the focus and closes the container in one press).
@@ -9495,7 +9527,8 @@ impl Game<'_> {
         }
     }
     /// ClientboundOpenScreenPacket for the menus Horizon draws.
-    fn remote_open_screen(&mut self, p: play::OpenScreen) {
+    pub(super) fn remote_open_screen(&mut self, p: play::OpenScreen) {
+        self.remote_unknown_menu_forget();
         // A new RecipeBookComponent owns fresh ghost slots and an overlay,
         // even when the server replaces a menu without a close packet.
         self.recipe_ui.reset_screen();
@@ -9599,17 +9632,10 @@ impl Game<'_> {
                 }
                 .into(),
             ))),
+            // A menu Horizon has no screen for: a mod's shows as the vanilla
+            // menu of its shape, or closes.
             _ => {
-                // Unsupported menu: tell the server we closed it.
-                self.send(S::ContainerClose(play::ContainerClose {
-                    container: p.container,
-                }));
-                self.chat_line(
-                    horizon_client::text::Text::literal(format!(
-                        "(Horizon cannot show {menu} screens yet)"
-                    )),
-                    horizon_client::chat::ChatSource::Client,
-                );
+                self.remote_unknown_menu(p.container, menu, p.title);
                 return;
             }
         };

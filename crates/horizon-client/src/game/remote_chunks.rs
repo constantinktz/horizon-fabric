@@ -316,7 +316,11 @@ impl Game<'_> {
                 }
                 _ => true,
             });
+            // LevelChunk.replaceWithPacketData: new block entities, no attachments.
+            r.fabric_attachments.column_received(x, z);
         }
+        // The tail of ClientChunkCache.replaceWithPacketData.
+        self.native_client_chunk_load([x, z]);
     }
 
     /// `ClientPacketListener.handleChunksBiomes`: each loaded column takes

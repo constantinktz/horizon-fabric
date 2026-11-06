@@ -30,6 +30,10 @@ const SNAPSHOT_BUDGET: Duration = Duration::from_millis(2);
 
 impl Game<'_> {
     pub(super) fn begin_closing_save(&mut self, quit: bool) -> Result<()> {
+        // Minecraft.exitWorldAndClose: the client stops before the server thread is asked to.
+        if quit {
+            self.native_lifecycle_client_stopping();
+        }
         if let Some(save) = &mut self.pending_save {
             save.quit |= quit;
             return Ok(());

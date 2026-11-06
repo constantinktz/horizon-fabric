@@ -6,6 +6,7 @@ use crate::{
     Result,
     adapter::ids,
     buf::{Codec, Reader, Writer},
+    fabric::particles,
     item::{Slot, Stack, Template},
 };
 use horizon_world::nbt::Tag;
@@ -140,6 +141,10 @@ pub enum ParticleData {
     /// Block state id (block, block_marker, falling_dust, dust_pillar,
     /// block_crumble).
     State(i32),
+    /// Fabric API's extended block option: the block state id and the
+    /// position it was read from (`fabric::particles`; only from a server
+    /// this client registered the channel with).
+    StateAt(i32, [i32; 3]),
     /// ARGB color (entity_effect, tinted_leaves, flash).
     Color(i32),
     /// Dust: color then scale.
@@ -194,7 +199,14 @@ impl Particle {
         }
         // `minecraft:particle_type` registry order as of 26.3.
         let data = match id {
-            1 | 2 | 36 | 121 | 125 => Some(ParticleData::State(ids::block_state(r.varint()?))),
+            1 | 2 | 36 | 121 | 125 => {
+                let block = particles::read_block(r, particles::negotiated())?;
+                let state = ids::block_state(block.state);
+                Some(match block.pos {
+                    Some(pos) => ParticleData::StateAt(state, pos),
+                    None => ParticleData::State(state),
+                })
+            }
             28 | 46 | 52 => Some(ParticleData::Color(r.i32()?)),
             21 => {
                 let color = r.i32()?;
@@ -249,6 +261,14 @@ impl Particle {
         let Some(data) = &self.data else { return };
         match data {
             ParticleData::State(s) | ParticleData::Delay(s) => w.varint(*s),
+            ParticleData::StateAt(state, pos) => particles::write_block(
+                w,
+                particles::BlockOption {
+                    state: *state,
+                    pos: Some(*pos),
+                },
+                particles::negotiated(),
+            ),
             ParticleData::Color(c) | ParticleData::Geyser(c) => w.i32(*c),
             ParticleData::ColorScale(c, f)
             | ParticleData::ColorPower(c, f)
@@ -654,5 +674,77 @@ mod tests {
                 (18, serializer::BOOLEAN, Value::Bool(true)),
             ]
         );
+    }
+
+    /// `ParticleTypes.STREAM_CODEC` with type 1 (`minecraft:block`), then
+    /// Fabric's extended option for state 9 at (123, -60, -456): the bytes of
+    /// a Java run (`fabric::particles` tests).
+    const FABRIC_BLOCK: [u8; 15] = [
+        0x01, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x09, 0x00, 0x00, 0x1e, 0xff, 0xff, 0xe3, 0x8f, 0xc4,
+    ];
+    /// Type 1 with the vanilla option for state 27000.
+    const VANILLA_BLOCK: [u8; 4] = [0x01, 0xf8, 0xd2, 0x01];
+
+    #[test]
+    fn fabric_block_particles_carry_their_position_once_negotiated() {
+        let _connection = particles::Scope::new();
+        particles::negotiate();
+        let data = [&FABRIC_BLOCK[..], &VANILLA_BLOCK[..]].concat();
+        let mut r = Reader::new(&data);
+        let fabric = Particle::read(&mut r).unwrap();
+        assert_eq!(
+            fabric,
+            Particle {
+                id: 1,
+                data: Some(ParticleData::StateAt(9, [123, -60, -456])),
+            }
+        );
+        assert_eq!(
+            Particle::read(&mut r).unwrap(),
+            Particle {
+                id: 1,
+                data: Some(ParticleData::State(27000)),
+            }
+        );
+        assert_eq!(r.remaining(), 0);
+        let mut w = Writer::new();
+        fabric.write(&mut w);
+        assert_eq!(w.data, FABRIC_BLOCK);
+    }
+
+    #[test]
+    fn without_the_channel_block_particles_stay_vanilla() {
+        let _connection = particles::Scope::new();
+        // Read as vanilla reads it: the marker is the state id, the rest is
+        // left over (a server only sends it to a client that registered).
+        let mut r = Reader::new(&FABRIC_BLOCK);
+        assert_eq!(
+            Particle::read(&mut r).unwrap(),
+            Particle {
+                id: 1,
+                data: Some(ParticleData::State(-1)),
+            }
+        );
+        assert_eq!(r.remaining(), 9);
+        // And the position is never written to such a peer.
+        let mut w = Writer::new();
+        Particle {
+            id: 1,
+            data: Some(ParticleData::StateAt(27000, [1, 2, 3])),
+        }
+        .write(&mut w);
+        assert_eq!(w.data, VANILLA_BLOCK);
+    }
+
+    #[test]
+    fn a_truncated_fabric_block_particle_is_an_error() {
+        let _connection = particles::Scope::new();
+        particles::negotiate();
+        for n in 0..FABRIC_BLOCK.len() {
+            assert!(
+                Particle::read(&mut Reader::new(&FABRIC_BLOCK[..n])).is_err(),
+                "{n}"
+            );
+        }
     }
 }
