@@ -51,6 +51,26 @@ impl OpenAttempt {
 pub(super) struct NativeLifecycle {
     attempt: Option<OpenAttempt>,
     read_scope: bool,
+    client: ClientPhase,
+}
+
+/// Where the window's own lifecycle is (Fabric's `ClientLifecycleEvents`):
+/// it starts with its first client tick and stops once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ClientPhase {
+    #[default]
+    NotStarted,
+    /// Started; `tick_open` while a client tick's start has fired and its end has not.
+    Running {
+        tick_open: bool,
+    },
+    Stopped,
+}
+
+/// What a client tick's start fires: `started` once, before the first tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ClientTickStart {
+    started: bool,
 }
 
 impl NativeLifecycle {
@@ -155,6 +175,41 @@ impl NativeLifecycle {
         }
     }
 
+    /// A client tick begins: `None` once the client stopped (no tick hook
+    /// follows `client_stopping`), else whether `client_started` fires first.
+    /// A start whose end never came (an errored tick) is simply replaced.
+    pub(super) fn client_tick_start(&mut self) -> Option<ClientTickStart> {
+        let started = match self.client {
+            ClientPhase::Stopped => return None,
+            ClientPhase::NotStarted => true,
+            ClientPhase::Running { .. } => false,
+        };
+        self.client = ClientPhase::Running { tick_open: true };
+        Some(ClientTickStart { started })
+    }
+
+    /// Pairs the last client tick start: false when there is none open.
+    pub(super) fn client_tick_end(&mut self) -> bool {
+        match &mut self.client {
+            ClientPhase::Running { tick_open } if *tick_open => {
+                *tick_open = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The client begins to stop: true at most once, and only once it started.
+    pub(super) fn client_stopping(&mut self) -> bool {
+        match self.client {
+            ClientPhase::Running { .. } => {
+                self.client = ClientPhase::Stopped;
+                true
+            }
+            ClientPhase::NotStarted | ClientPhase::Stopped => false,
+        }
+    }
+
     /// Pairs the last start; an errored tick never reaches it.
     pub(super) fn server_tick_end(
         &mut self,
@@ -235,6 +290,55 @@ impl Game<'_> {
         }
     }
 
+    /// The head of a client tick of the window (`Minecraft.tick`): the
+    /// first one tells `native_client_started` before it. Nothing on a
+    /// server's `Game` or once the client is stopping. API @API:client_lifecycle@.
+    pub(super) fn native_lifecycle_client_tick_start(&mut self) {
+        if !self.native_window() {
+            return;
+        }
+        let Some(start) = self.native_lifecycle.client_tick_start() else {
+            return;
+        };
+        if start.started {
+            self.native_client_started();
+        }
+        self.native_client_tick_pre();
+    }
+
+    /// The end of the client tick `native_lifecycle_client_tick_start` began.
+    pub(super) fn native_lifecycle_client_tick_end(&mut self) {
+        if self.native_window() && self.native_lifecycle.client_tick_end() {
+            self.native_client_tick_post();
+        }
+    }
+
+    /// The player quits or closes the window: `native_client_stopping`
+    /// once, before single player's server thread is asked to stop. Every
+    /// way out calls it; only the first tells.
+    pub(super) fn native_lifecycle_client_stopping(&mut self) {
+        if self.native_window() && self.native_lifecycle.client_stopping() {
+            self.native_client_stopping();
+        }
+    }
+
+    /// The client's level is about to forget the columns `gone` (a run of
+    /// `ForgetLevelChunk`, or a moved or resized view): `native_client_chunk_unload`
+    /// for each one it holds, while it still does. Columns it never had are
+    /// not told, as `ClientChunkCache.drop` skips them. API @API:client_chunks@.
+    pub(super) fn native_client_chunks_unloading<'a>(
+        &mut self,
+        gone: impl IntoIterator<Item = &'a (i32, i32)>,
+    ) {
+        if horizon_client::mod_api::mods().is_empty() {
+            return;
+        }
+        let chunks = &self.world.chunks;
+        for chunk in resident_columns(gone, |column| chunks.contains_key(column)) {
+            self.native_client_chunk_unload(chunk);
+        }
+    }
+
     /// An errored tick returned at `result?` before this site.
     pub(super) fn native_lifecycle_server_tick_end(&mut self, paused: bool) {
         if let Some((context, phase)) = self.native_lifecycle.server_tick_end(paused) {
@@ -243,6 +347,22 @@ impl Game<'_> {
             self.native_lifecycle.read_scope = false;
         }
     }
+}
+
+/// The columns of `gone` the level holds, each once, in a fixed order (by
+/// `x`, then `z`) so every mod hears a run the same way whatever the set's order.
+fn resident_columns<'a>(
+    gone: impl IntoIterator<Item = &'a (i32, i32)>,
+    loaded: impl Fn(&(i32, i32)) -> bool,
+) -> Vec<[i32; 2]> {
+    let mut columns: Vec<[i32; 2]> = gone
+        .into_iter()
+        .filter(|column| loaded(column))
+        .map(|&(x, z)| [x, z])
+        .collect();
+    columns.sort_unstable();
+    columns.dedup();
+    columns
 }
 
 #[cfg(test)]
@@ -347,6 +467,58 @@ mod tests {
         let mut lifecycle = opening();
         lifecycle.begin_close();
         assert!(lifecycle.world_close_final().is_some());
+    }
+
+    #[test]
+    fn the_client_starts_before_its_first_tick_and_only_once() {
+        let mut life = NativeLifecycle::default();
+        assert!(!life.client_tick_end(), "no end before any start");
+        let first = life.client_tick_start().expect("the first tick runs");
+        assert!(first.started, "started fires before the first tick");
+        assert!(life.client_tick_end());
+        assert!(!life.client_tick_end(), "each start pairs one end");
+        for _ in 0..3 {
+            let next = life.client_tick_start().expect("later ticks run");
+            assert!(!next.started, "started fires once");
+            assert!(life.client_tick_end());
+        }
+    }
+
+    #[test]
+    fn an_errored_client_tick_leaves_no_end_behind() {
+        let mut life = NativeLifecycle::default();
+        life.client_tick_start();
+        // The tick returned early: the next start replaces the open one.
+        life.client_tick_start();
+        assert!(life.client_tick_end());
+        assert!(!life.client_tick_end());
+    }
+
+    #[test]
+    fn the_client_stops_once_and_no_tick_follows() {
+        let mut life = NativeLifecycle::default();
+        assert!(
+            !life.client_stopping(),
+            "a client that never ticked never started, so never stops"
+        );
+        life.client_tick_start();
+        // Quitting mid-tick: the tick's end is not told after stopping.
+        assert!(life.client_stopping());
+        assert!(!life.client_tick_end());
+        assert!(!life.client_stopping(), "both ways out call it; one tells");
+        assert!(life.client_tick_start().is_none());
+        assert!(!life.client_tick_end());
+    }
+
+    #[test]
+    fn only_loaded_columns_are_told_unloading_once_each() {
+        let loaded = [(0, 0), (-3, 7), (5, -2)];
+        let gone = [(5, -2), (9, 9), (0, 0), (-3, 7), (0, 0), (1, 0)];
+        assert_eq!(
+            resident_columns(&gone, |c| loaded.contains(c)),
+            vec![[-3, 7], [0, 0], [5, -2]]
+        );
+        assert!(resident_columns(&[(9, 9)], |c| loaded.contains(c)).is_empty());
     }
 
     #[test]

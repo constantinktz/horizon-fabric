@@ -1,0 +1,24 @@
+{
+  "hooks": [
+    {
+      "name": "client_chunk_load",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_client_chunk_load",
+      "side": "client",
+      "cancellable": false,
+      "mod_api": {
+        "contract": "listen"
+      }
+    },
+    {
+      "name": "client_chunk_unload",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_client_chunk_unload",
+      "side": "client",
+      "cancellable": false,
+      "mod_api": {
+        "contract": "listen"
+      }
+    }
+  ],
+  "rust_summary": "a server's chunk columns coming into and leaving the client's level (`native_client_chunk_load`, `native_client_chunk_unload`).",
+  "doc_summary": "A server's chunk column came into the client's level, its blocks and block entities in place (`native_client_chunk_load(chunk)`, Fabric's `ClientChunkEvents.CHUNK_LOAD`; a column sent again is told again), or is about to leave it because the server forgot it or the view moved past it (`native_client_chunk_unload(chunk)`, `CHUNK_UNLOAD`; only loaded columns, each once, never for the whole level, which `native_client_level_unload` tells). `chunk` is `[x, z]` in chunks. Client-side, on any server, single player's own included. Bundles need \"hooks\": @API:client_chunks@."
+}

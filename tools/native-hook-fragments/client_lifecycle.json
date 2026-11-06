@@ -1,0 +1,45 @@
+{
+  "hooks": [
+    {
+      "name": "client_started",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_client_started",
+      "side": "client",
+      "cancellable": false,
+      "mod_api": {
+        "contract": "listen"
+      }
+    },
+    {
+      "name": "client_stopping",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_client_stopping",
+      "side": "client",
+      "cancellable": false,
+      "mod_api": {
+        "contract": "listen"
+      }
+    },
+    {
+      "name": "client_tick_pre",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_client_tick_pre",
+      "neoforge": "ClientTickEvent.Pre",
+      "side": "client",
+      "cancellable": false,
+      "mod_api": {
+        "contract": "listen"
+      }
+    },
+    {
+      "name": "client_tick_post",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_client_tick_post",
+      "neoforge": "ClientTickEvent.Post",
+      "side": "client",
+      "cancellable": false,
+      "mod_api": {
+        "contract": "listen"
+      }
+    }
+  ],
+  "rust_summary": "the window's game starting and stopping, and the start and end of every client tick, menus included (`native_client_started`, `native_client_stopping`, `native_client_tick_pre`, `native_client_tick_post`).",
+  "doc_summary": "The window's own lifecycle, as Fabric's `ClientLifecycleEvents` and `ClientTickEvents` have it: `native_client_started()` once before the first client tick, `native_client_stopping()` once when the player quits or closes the window (before single player's server thread is told to stop), and `native_client_tick_pre()` / `native_client_tick_post()` (NeoForge's `ClientTickEvent.Pre` and `.Post`) around every client tick, on the title screen, in menus and while paused too, which `native_tick` is not. Client-side, the window only. Bundles need \"hooks\": @API:client_lifecycle@.",
+  "comments": ["crates/horizon-client/src/game/native_lifecycle.rs"]
+}

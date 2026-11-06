@@ -175,3 +175,56 @@ fn client_packet_hands_a_mod_the_decoded_packet() {
         [("voicechat:secret".to_string(), vec![1, 2, 3])]
     );
 }
+
+#[test]
+fn a_mod_hears_the_client_lifecycle_and_its_chunks() {
+    use horizon_client::mod_api::{
+        ClientChunkLoadEvent, ClientChunkUnloadEvent, ClientStartedEvent, ClientStoppingEvent,
+        ClientTickPostEvent, ClientTickPreEvent, dispatch_client_chunk_load,
+        dispatch_client_chunk_unload, dispatch_client_started, dispatch_client_stopping,
+        dispatch_client_tick_post, dispatch_client_tick_pre,
+    };
+    use std::sync::{Arc, Mutex};
+    struct TestHost;
+    impl Host for TestHost {}
+    /// A minimap's view of the client: which columns it holds, and its ticks.
+    type Seen = Arc<Mutex<(Vec<[i32; 2]>, Vec<&'static str>)>>;
+    struct Minimap(Seen);
+    impl Hooks for Minimap {
+        fn client_started(&self, _: &mut dyn Host, _: &mut ClientStartedEvent) {
+            self.0.lock().unwrap().1.push("started");
+        }
+        fn client_tick_pre(&self, _: &mut dyn Host, _: &mut ClientTickPreEvent) {
+            self.0.lock().unwrap().1.push("pre");
+        }
+        fn client_tick_post(&self, _: &mut dyn Host, _: &mut ClientTickPostEvent) {
+            self.0.lock().unwrap().1.push("post");
+        }
+        fn client_stopping(&self, _: &mut dyn Host, _: &mut ClientStoppingEvent) {
+            self.0.lock().unwrap().1.push("stopping");
+        }
+        fn client_chunk_load(&self, _: &mut dyn Host, event: &mut ClientChunkLoadEvent) {
+            self.0.lock().unwrap().0.push(event.chunk);
+        }
+        fn client_chunk_unload(&self, _: &mut dyn Host, event: &mut ClientChunkUnloadEvent) {
+            self.0.lock().unwrap().0.retain(|c| *c != event.chunk);
+        }
+    }
+    let seen = Seen::default();
+    let mods: Vec<Box<dyn Hooks>> = vec![Box::new(Minimap(seen.clone()))];
+    let host = &mut TestHost;
+    dispatch_client_started(host, &mods);
+    dispatch_client_tick_pre(host, &mods);
+    dispatch_client_chunk_load(host, &mods, [3, -4]);
+    dispatch_client_chunk_load(host, &mods, [-1, 0]);
+    dispatch_client_chunk_unload(host, &mods, [3, -4]);
+    dispatch_client_tick_post(host, &mods);
+    dispatch_client_stopping(host, &mods);
+    let (chunks, events) = &*seen.lock().unwrap();
+    assert_eq!(
+        chunks,
+        &vec![[-1, 0]],
+        "the unloaded column is gone, the other kept"
+    );
+    assert_eq!(events, &vec!["started", "pre", "post", "stopping"]);
+}

@@ -2233,6 +2233,62 @@ impl Game<'_> {
     pub(super) fn native_tick(&mut self) {
         mod_api::dispatch_tick(self, mod_api::mods());
     }
+    /// The window's game has started and is about to run its first client
+    /// tick (Fabric's `ClientLifecycleEvents.CLIENT_STARTED`, from
+    /// `Minecraft.run`): once a process, before the first
+    /// `native_client_tick_pre`, on the title screen or wherever the game
+    /// opens. Client-side, the window only. API @API:client_lifecycle@.
+    pub(super) fn native_client_started(&mut self) {
+        mod_api::dispatch_client_started(self, mod_api::mods());
+    }
+    /// The window's game begins to stop (Fabric's
+    /// `ClientLifecycleEvents.CLIENT_STOPPING`, `Minecraft.exitWorldAndClose`
+    /// once it logs "Stopping!"): the player quit or closed the window, and
+    /// single player's server thread has not been told to stop yet, so its
+    /// world is still open. Once, and only after `native_client_started`; no
+    /// client tick hook fires after it, though the save screen may still
+    /// draw. Client-side, the window only. API @API:client_lifecycle@.
+    pub(super) fn native_client_stopping(&mut self) {
+        mod_api::dispatch_client_stopping(self, mod_api::mods());
+    }
+    /// The start of every client tick of the window (NeoForge's
+    /// `ClientTickEvent.Pre`, Fabric's `ClientTickEvents.START_CLIENT_TICK`:
+    /// the head of `Minecraft.tick`), twenty a second at the normal rate,
+    /// on the title screen, in menus and while paused too, unlike
+    /// `native_tick`, which only runs while a level ticks. Always paired with
+    /// `native_client_tick_post`. Client-side, the window only. API @API:client_lifecycle@.
+    pub(super) fn native_client_tick_pre(&mut self) {
+        mod_api::dispatch_client_tick_pre(self, mod_api::mods());
+    }
+    /// The end of the client tick `native_client_tick_pre` began (NeoForge's
+    /// `ClientTickEvent.Post`, Fabric's `ClientTickEvents.END_CLIENT_TICK`):
+    /// the world, the screens, chat, music and sounds have ticked. The place
+    /// for a key's `consumeClick` loop or a mod's per-tick client work.
+    /// Client-side, the window only. API @API:client_lifecycle@.
+    pub(super) fn native_client_tick_post(&mut self) {
+        mod_api::dispatch_client_tick_post(self, mod_api::mods());
+    }
+    /// A server's chunk column `chunk` (`[x, z]`, in chunks) came into the
+    /// client's level (Fabric's `ClientChunkEvents.CHUNK_LOAD`, at the end of
+    /// `ClientChunkCache.replaceWithPacketData`): its blocks and block
+    /// entities are in place, though it may not be lit or drawn yet. A column
+    /// the server sends again while it is loaded is told again, with no
+    /// unload between, as in Fabric. The level is the one the last
+    /// `native_client_level_load` named. Client-side, on any server, single
+    /// player's own included. API @API:client_chunks@.
+    pub(super) fn native_client_chunk_load(&mut self, chunk: [i32; 2]) {
+        mod_api::dispatch_client_chunk_load(self, mod_api::mods(), chunk);
+    }
+    /// A chunk column `chunk` is about to leave the client's level (Fabric's
+    /// `ClientChunkEvents.CHUNK_UNLOAD`, `ClientChunkCache.drop` and
+    /// `updateViewRadius`): the server forgot it, or the view centre or
+    /// radius moved past it. Its blocks are still there for this call. Only
+    /// columns that were loaded are told, each once. Not told when the
+    /// whole level goes (`native_client_level_unload` tells that), as
+    /// vanilla drops a level's chunks with it. Client-side. API @API:client_chunks@.
+    pub(super) fn native_client_chunk_unload(&mut self, chunk: [i32; 2]) {
+        mod_api::dispatch_client_chunk_unload(self, mod_api::mods(), chunk);
+    }
     /// Before an eligible targeted block's selection outline is built.
     /// Cancel skips only the default block highlight, after normal HUD and game-mode gates.
     pub(super) fn native_block_highlight(
