@@ -84,11 +84,8 @@ python3 tools/fabric_e2e.py --profile minimal --profile vanilla-perfected --bin-
 ```
 
 Profiles: `minimal` (Fabric Loader 0.19.5 and Fabric API 0.162.0+26.3, downloaded once into
-`.local/fabric-e2e/`, a flat world), `vanilla-perfected` (a copy of a prepared server folder,
-`--server-dir`; the source is never touched), and `modules` / `blocks` (minimal plus small Modrinth
-mods that exercise a module: Carry On for the attachment sync, Just Enough Breeding for the recipe
-sync, Scholar for extended menus, RebornCore for custom ingredients, Animal Feeding Trough for
-modded block states).
+`.local/fabric-e2e/`, a flat world) and `vanilla-perfected` (a copy of a prepared server folder,
+`--server-dir`; the source is never touched). It never downloads or runs third-party mods.
 
 Checks: joined, chunks received, the chat line and `/list` came back, no undecodable packet, no
 disconnect, the client answered `fabric:registry/sync/complete`, and one per Fabric API module

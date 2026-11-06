@@ -80,8 +80,8 @@ CI (`fabric-checks.yml`) runs the first, the protocol tests and the two tree che
   only by the one integrating.
 - Runs get scratch `HORIZON_HOME`/`XDG_*` dirs (Horizon's AGENTS.md); servers you start are offline, on 127.0.0.1,
   and stopped when you finish. Never connect to someone's real server for a test.
-- Downloading and running third-party mods (Modrinth jars for the `modules`/`blocks` profiles) needs the owner's
-  OK first.
+- Never download or run third-party mod jars for a test; use Fabric API itself or a server folder the owner
+  prepared.
 
 ## What's open
 

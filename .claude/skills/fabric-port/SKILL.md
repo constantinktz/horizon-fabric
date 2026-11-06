@@ -30,7 +30,7 @@ Full guide: `docs/fabric-development.md`. Module map: `docs/fabric-api.md`. Serv
 - `cargo test -p horizon-protocol fabric::`, `cargo test -p horizon-client --lib fabric`, clippy `-D warnings`,
   `cargo fmt --all -- --check`, `python3 tools/check_fabric_mods.py`.
 - End to end: `python3 tools/fabric_e2e.py --profile minimal --bin-dir target/fast` (scratch dirs, offline server
-  on 127.0.0.1). Third-party mod downloads need the owner's OK.
+  on 127.0.0.1). Never download or run third-party mod jars for a test.
 
 ## 4. Document
 - The module's row in `docs/fabric-api.md`, the behaviour in `docs/fabric-servers.md`, what is still missing,
