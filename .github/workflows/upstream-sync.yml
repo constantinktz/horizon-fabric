@@ -1,0 +1,98 @@
+name: upstream-sync
+
+# Brings horizon-rust/horizon's main into this repository: every 6 hours it merges upstream into the branch
+# `sync/upstream` and opens (or updates) a pull request into main, which still needs the owner's approval.
+# A merge with conflicts opens an issue listing the files instead.
+#
+# Needs the secret SYNC_TOKEN: a fine-grained token for this repository only, with Contents, Pull requests,
+# Issues, Actions and Workflows set to read and write (upstream commits touch .github/workflows, which the
+# built-in GITHUB_TOKEN may not push).
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'constantinktz/horizon-fabric'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+      BRANCH: sync/upstream
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Merge upstream main
+        id: merge
+        run: |
+          set -euo pipefail
+          git config user.name "horizon-fabric sync"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/horizon-rust/horizon.git
+          git fetch --no-tags upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date with upstream."
+            echo "result=current" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "upstream=$(git rev-parse --short upstream/main)" >> "$GITHUB_OUTPUT"
+          git checkout -B "$BRANCH"
+          if git merge --no-edit --no-ff upstream/main -m "Merge horizon-rust/horizon main ($(git rev-parse --short upstream/main))"; then
+            echo "result=merged" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt"
+            git merge --abort
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or update the pull request
+        if: steps.merge.outputs.result == 'merged'
+        run: |
+          set -euo pipefail
+          git push --force origin "$BRANCH"
+          body="Merges horizon-rust/horizon main (${{ steps.merge.outputs.upstream }}) into this repository.
+          Merge it with a merge commit, not squash, so the next sync starts from here."
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head "$BRANCH" --title "Sync with upstream Horizon" --body "$body"
+          else
+            gh pr comment "$BRANCH" --body "Updated to upstream ${{ steps.merge.outputs.upstream }}."
+          fi
+
+      - name: Report conflicts
+        if: steps.merge.outputs.result == 'conflict'
+        run: |
+          set -euo pipefail
+          title="Upstream sync has conflicts"
+          body="$(printf 'Merging horizon-rust/horizon main (%s) into main conflicts in:\n\n' '${{ steps.merge.outputs.upstream }}'; sed 's/^/- `/; s/$/`/' "$RUNNER_TEMP/conflicts.txt"; printf '\nResolve it locally: `git fetch upstream && git merge upstream/main`, then open a pull request.\n')"
+          existing="$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')"
+          if [ -z "$existing" ]; then
+            gh issue create --title "$title" --body "$body"
+          else
+            gh issue comment "$existing" --body "$body"
+          fi
+
+      # Upstream's own workflows (nightlies, releases, parity runs) would run here too, without its secrets.
+      # Only this sync and the checks below stay on.
+      - name: Keep upstream's workflows off
+        run: |
+          set -euo pipefail
+          gh workflow list --all --json id,path,state --jq '.[] | select(.state == "active") | "\(.id) \(.path)"' |
+          while read -r id path; do
+            case "$path" in
+              .github/workflows/upstream-sync.yml|.github/workflows/fabric-checks.yml) ;;
+              *) gh workflow disable "$id" && echo "disabled $path" ;;
+            esac
+          done

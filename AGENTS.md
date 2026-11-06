@@ -4,6 +4,10 @@ Minecraft: Java Edition 26.3 rewritten in Rust (wgpu). Vanilla is the specificat
 feature. Read [CONTRIBUTING.md](CONTRIBUTING.md) once; this page tells you where things are.
 Feature → files → harness for the most-changed areas: [docs/architecture.md](docs/architecture.md).
 
+> **This is Horizon Fabric** (`constantinktz/horizon-fabric`): Horizon plus Fabric API's port and Fabric mod ports.
+> Read [docs/fabric-development.md](docs/fabric-development.md) before you change anything: upstream sync, where the
+> Fabric code lives, tests, checks. Fabric work: skill `.claude/skills/fabric-port`; mod ports: `fabric-mods/`.
+
 ## Rules that bite
 
 - **Never commit Mojang's files**: game jars, assets, decompiled source, prepared resources (`.local/`).

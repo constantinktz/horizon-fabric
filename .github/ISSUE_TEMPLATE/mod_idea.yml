@@ -1,0 +1,25 @@
+name: Port a Fabric mod
+description: Propose a Horizon port of a Fabric mod (or a new mod) before you build it
+labels: [mod-proposal]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What the mod does
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options: [Content mod (.hmod), Native mod (.hnmod), Both]
+    validations:
+      required: true
+  - type: input
+    id: original
+    attributes:
+      label: Original mod (for ports), with its licence
+  - type: textarea
+    id: hooks
+    attributes:
+      label: Native hooks it needs (native mods)
