@@ -20,6 +20,14 @@ use crate::{
 };
 use std::collections::HashMap;
 
+pub mod attachment;
+pub mod ingredient;
+pub mod menu;
+pub mod particles;
+pub mod recipe;
+pub mod splitter;
+pub mod state_ids;
+
 /// The channel registration payload (`RegistrationPayload.REGISTER`).
 pub const REGISTER: &str = "minecraft:register";
 /// `CommonVersionPayload`: the common packet versions each side supports.
