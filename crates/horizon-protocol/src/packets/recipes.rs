@@ -16,7 +16,8 @@ pub enum HolderSet {
 }
 impl HolderSet {
     pub fn read(r: &mut Reader) -> Result<Self> {
-        let n = r.varint()? - 1;
+        // i64: a server's i32::MIN must not overflow the subtraction.
+        let n = i64::from(r.varint()?) - 1;
         if n == -1 {
             return Ok(Self::Tag(r.string(32767)?));
         }

@@ -137,6 +137,73 @@ impl StateFacts {
         })
     }
 }
+/// What a state id Horizon doesn't have stands for: a plain full block, as
+/// vanilla's stone is in the block report and `gameplay-facts.json`
+/// (`minecraft:stone`, hardness 1.5, needs a tool, stone sounds), so a mod's
+/// block a server sends still has a floor and walls. Its item is air: picking
+/// it gives nothing.
+pub fn unknown_state() -> &'static StateFacts {
+    static UNKNOWN: std::sync::LazyLock<StateFacts> = std::sync::LazyLock::new(|| {
+        let sound = |s: &str| Arc::from(format!("minecraft:block.stone.{s}"));
+        StateFacts {
+            name: Arc::from("minecraft:stone"),
+            emission: 0,
+            dampening: 15,
+            skylight_down: false,
+            shape_occlusion: false,
+            can_occlude: true,
+            solid_render: true,
+            hardness: 1.5,
+            requires_tool: true,
+            replaceable: false,
+            random_ticks: false,
+            block_entity: false,
+            render_shape: RenderShape::Model,
+            full_collision: true,
+            friction: 0.6,
+            explosion_resistance: 6.0,
+            item: Arc::from("minecraft:air"),
+            sounds: Sounds {
+                volume: 1.0,
+                pitch: 1.0,
+                break_sound: sound("break"),
+                step: sound("step"),
+                place: sound("place"),
+                hit: sound("hit"),
+                fall: sound("fall"),
+            },
+            fluid: Fluid::None,
+            fluid_level: 0,
+            fluid_falling: false,
+            waterlogged: false,
+            random_offset: false,
+            outline_offset: false,
+            legacy_solid: true,
+            sturdy_full: 63,
+            classes: Arc::from([Arc::from("Block")]),
+            outline: Arc::from([[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]),
+            // The edges of stone's outline in the order the export lists them
+            // (`VoxelShape.forAllEdges`), not `cube_edges`'.
+            outline_edges: Arc::from([
+                [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0, 0.0, 1.0, 1.0],
+                [1.0, 0.0, 0.0, 1.0, 0.0, 1.0],
+                [1.0, 1.0, 0.0, 1.0, 1.0, 1.0],
+                [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0, 1.0, 1.0],
+                [1.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+                [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0, 1.0, 1.0, 0.0],
+                [0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            ]),
+            // MapColor.STONE (7368816).
+            map_color: 11,
+        }
+    });
+    &UNKNOWN
+}
 /// Compact, owned behaviour inputs retained until the normal behaviour startup stage.
 /// No borrowed gameplay JSON or process-wide cache survives the fact loader.
 pub struct GameplayProjection {
@@ -512,9 +579,13 @@ impl BlockFacts {
             extra,
         ))
     }
+    /// The state's facts; an id past the table (a server mod's state, a
+    /// corrupt palette) gets [`unknown_state`]'s, never a panic.
     #[inline]
     pub fn get(&self, id: BlockStateId) -> &StateFacts {
-        &self.states[id.0 as usize]
+        self.states
+            .get(id.0 as usize)
+            .unwrap_or_else(|| unknown_state())
     }
     /// `SignBlock.getWoodType`'s name for a sign block.
     pub fn wood_type(&self, block: &str) -> Option<&str> {
@@ -522,7 +593,7 @@ impl BlockFacts {
     }
     pub fn is_air(&self, id: BlockStateId) -> bool {
         matches!(
-            &*self.states[id.0 as usize].name,
+            &*self.get(id).name,
             "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
         )
     }
@@ -578,5 +649,97 @@ impl GameplayStateSource for decode::Entry<'_> {
             "fall" => self.sound.fall.id.as_deref().unwrap_or(""),
             _ => "",
         }
+    }
+}
+
+#[cfg(test)]
+mod unknown_state_tests {
+    use super::*;
+
+    fn facts() -> BlockFacts {
+        let mut air = unknown_state().clone();
+        air.name = Arc::from("minecraft:air");
+        let mut dirt = unknown_state().clone();
+        dirt.name = Arc::from("minecraft:dirt");
+        BlockFacts {
+            states: vec![air, dirt],
+            air: BlockStateId(0),
+            woods: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn ids_past_the_table_are_the_placeholder_and_never_panic() {
+        let facts = facts();
+        assert_eq!(&*facts.get(BlockStateId(0)).name, "minecraft:air");
+        assert_eq!(&*facts.get(BlockStateId(1)).name, "minecraft:dirt");
+        assert!(facts.is_air(BlockStateId(0)));
+        for id in [2, 35723, 65536, u32::MAX] {
+            let state = facts.get(BlockStateId(id));
+            assert!(std::ptr::eq(state, unknown_state()));
+            assert!(!facts.is_air(BlockStateId(id)));
+            assert!(state.full_collision);
+        }
+    }
+
+    /// The placeholder is vanilla's stone as the exporter saw it (state 1 of
+    /// 26.3), except that picking it gives no item.
+    #[test]
+    fn the_placeholder_is_vanillas_stone() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client/26.3");
+        let Ok(file) = File::open(root.join("facts.json")) else {
+            eprintln!("no prepared resources: skipped");
+            return;
+        };
+        let (registry, _) = BlockRegistry::from_facts_json_with_flags(file).unwrap();
+        let facts = BlockFacts::load(&root, &registry).unwrap();
+        let stone = facts.get(BlockStateId(1));
+        let unknown = unknown_state();
+        assert_eq!(&*stone.name, "minecraft:stone");
+        let fields = |s: &StateFacts| {
+            format!(
+                "{:?} {:?} {:?}",
+                (
+                    &s.name,
+                    s.emission,
+                    s.dampening,
+                    s.skylight_down,
+                    s.shape_occlusion,
+                    s.can_occlude,
+                    s.solid_render,
+                ),
+                (
+                    s.hardness,
+                    s.requires_tool,
+                    s.replaceable,
+                    s.random_ticks,
+                    s.block_entity,
+                    s.render_shape,
+                    s.full_collision,
+                    s.friction,
+                    s.explosion_resistance,
+                ),
+                (
+                    (
+                        &s.sounds.break_sound,
+                        &s.sounds.step,
+                        &s.sounds.place,
+                        &s.sounds.hit,
+                        &s.sounds.fall
+                    ),
+                    (s.fluid, s.fluid_level, s.fluid_falling, s.waterlogged),
+                    (
+                        s.random_offset,
+                        s.outline_offset,
+                        s.legacy_solid,
+                        s.sturdy_full
+                    ),
+                    (&s.classes, &s.outline, &s.outline_edges, s.map_color),
+                )
+            )
+        };
+        assert_eq!(fields(unknown), fields(stone));
+        assert_eq!(&*unknown.item, "minecraft:air");
     }
 }
