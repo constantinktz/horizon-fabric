@@ -278,6 +278,7 @@
   "horizon.osk.type": "Eingeben",
   "horizon.osk.symbols": "Symbole",
   "horizon.osk.close": "Schließen",
+  "horizon.multiplayer.fabric_unreadable": "Einige Items oder Effekte der Mods dieses Servers kann Horizon noch nicht anzeigen: sie fehlen",
   "horizon.multiplayer.fabric_unsupported": "Die Mods dieses Fabric-Servers bringen Inhalte mit, die Horizon noch nicht spielen kann: %s",
   "horizon.multiplayer.menu_unsupported": "Horizon kann das Menü %s dieses Servers noch nicht anzeigen",
   "horizon.multiplayer.not_signed_in": "Dieser Server läuft im Online-Modus. Melde dich im Horizon-Launcher mit deinem Microsoft-Konto an, um ihm beizutreten.",

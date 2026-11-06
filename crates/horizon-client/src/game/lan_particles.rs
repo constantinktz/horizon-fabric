@@ -468,8 +468,14 @@ impl Game<'_> {
                     Some(ParticleData::StateAt(_, from)) => *from,
                     _ => at.map(|v| v.floor() as i32),
                 };
+                // A Fabric server mod's state reads as -1: the placeholder's.
+                let state = if *s < 0 {
+                    horizon_protocol::fabric::state_ids::PLACEHOLDER_STATE as u32
+                } else {
+                    *s as u32
+                };
                 let (sprite, tint) = self
-                    .particle_sprite(BlockStateId(*s as u32), pos)
+                    .particle_sprite(BlockStateId(state), pos)
                     .unwrap_or_else(|| ("block/stone".into(), 0xFFFFFF));
                 ParticleOptions::block(ty, sprite, tint)
             }

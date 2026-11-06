@@ -10,6 +10,7 @@ use horizon_client::{
 use horizon_core::paletted::{PalettedContainer, Strategy};
 use horizon_protocol::{
     chunk::{LightData, Paletted, SectionLight},
+    fabric::state_ids,
     packets::play::{self, Clientbound as C},
     registry::DimensionType,
 };
@@ -32,6 +33,10 @@ pub(super) struct ChunkFormat {
     has_skylight: bool,
     biome_map: Vec<u16>,
     biome_bits: u8,
+    /// A Fabric server's first mod block state (`fabric::state_ids`): that
+    /// and every later id stands as the placeholder, never as whatever
+    /// Horizon (a content mod) numbers there.
+    modded_states: Option<u32>,
 }
 
 impl ChunkFormat {
@@ -43,7 +48,19 @@ impl ChunkFormat {
             has_skylight: dimension.has_skylight,
             biome_map,
             biome_bits,
+            modded_states: None,
         }
+    }
+    /// Ids from `first` on are a Fabric server mod's block states.
+    pub(super) fn with_modded_states(self, first: Option<u32>) -> Self {
+        Self {
+            modded_states: first,
+            ..self
+        }
+    }
+    /// The first id of a Fabric server mod's block states, if any.
+    pub(super) fn modded_states(&self) -> Option<u32> {
+        self.modded_states
     }
     /// Decodes into chunks of `column`.
     pub(super) fn in_column(self, column: ColumnLayout) -> Self {
@@ -56,6 +73,7 @@ impl ChunkFormat {
     pub(super) fn with_dimension(&self, dimension: &DimensionType) -> Self {
         Self {
             column: self.column,
+            modded_states: self.modded_states,
             ..Self::new(dimension, self.biome_map.clone(), self.biome_bits)
         }
     }
@@ -83,16 +101,21 @@ impl ChunkFormat {
             } else {
                 Strategy::blocks(s.states.bits)
             };
-            let palette = s.states.palette.iter().map(|&p| p as u32).collect();
+            let placed = |id: u32| state_ids::placed_state(id, self.modded_states);
+            let palette = s.states.palette.iter().map(|&p| placed(p as u32)).collect();
             let words = s.states.data.iter().map(|&w| w as u64).collect();
             let mut blocks = PalettedContainer::from_wire(strategy, s.states.bits, palette, words)
                 .map_err(|e| e.to_string())?;
-            if strategy.global_bits != ours.global_bits {
+            let global = s.states.palette.is_empty() && s.states.bits != 0;
+            if strategy.global_bits != ours.global_bits || (global && self.modded_states.is_some())
+            {
                 let mut values = [0u32; 4096];
                 blocks.unpack(&mut values);
-                // Ids past our registry (a host with mods we lack) read as air.
+                // A Fabric server mod's states stand as the placeholder; ids
+                // past our registry (a host with mods we lack) read as air.
                 let limit = 1u64 << ours.global_bits;
                 for v in &mut values {
+                    *v = placed(*v);
                     if u64::from(*v) >= limit {
                         *v = 0;
                     }
@@ -445,6 +468,64 @@ mod tests {
             }
         }
         assert!(matches!(decoder.next(), Next::Decoding));
+    }
+
+    /// A column of `values` (by entry index) in the first section, air above.
+    fn column_of(values: &[i32; 4096]) -> play::LevelChunkWithLight {
+        let mut sections = vec![
+            Wire {
+                non_empty: 0,
+                fluids: 0,
+                states: Paletted::from_values(&[0; 4096], Wiring::Blocks, 16),
+                biomes: Paletted::from_values(&[1; 64], Wiring::Biomes, 2),
+            };
+            24
+        ];
+        sections[0].states = Paletted::from_values(values, Wiring::Blocks, 16);
+        let C::LevelChunkWithLight(mut p) = *packet(0, 0) else {
+            unreachable!()
+        };
+        p.chunk.buffer = ChunkData::from_sections(&sections);
+        p
+    }
+
+    /// A Fabric server whose mods add blocks after vanilla's: its states from
+    /// 35723 on (26.3 has 35723, `reports/blocks.json`) are its mods' and
+    /// stand as stone (state 1), in a palette and in the global palette
+    /// alike; vanilla's ids stay as sent.
+    #[test]
+    fn a_fabric_servers_mod_states_stand_as_the_placeholder() {
+        let overworld = DimensionType::vanilla("minecraft:overworld");
+        let format = ChunkFormat::new(&overworld, vec![0, 7, 9], 2).with_modded_states(Some(35723));
+        // A palette: four values.
+        let mut few = [9; 4096];
+        few[1] = 35722;
+        few[2] = 35723;
+        few[3] = 40000;
+        let column = format.column(&column_of(&few)).unwrap();
+        let at = |i: usize| {
+            (
+                (i & 15) as i32,
+                -64 + (i >> 8) as i32,
+                ((i >> 4) & 15) as i32,
+            )
+        };
+        let got = |c: &Chunk, i: usize| {
+            let (x, y, z) = at(i);
+            c.get(x, y, z)
+        };
+        assert_eq!([0, 1, 2, 3].map(|i| got(&column, i)), [9, 35722, 1, 1]);
+        // The global palette: 4096 distinct values, 35000 to 39095.
+        let many: [i32; 4096] = std::array::from_fn(|i| 35000 + i as i32);
+        let column = format.column(&column_of(&many)).unwrap();
+        assert_eq!(got(&column, 0), 35000);
+        assert_eq!(got(&column, 722), 35722);
+        assert_eq!(got(&column, 723), 1);
+        assert_eq!(got(&column, 4095), 1);
+        // Without mod blocks the same ids pass as they are.
+        let vanilla = ChunkFormat::new(&overworld, vec![0, 7, 9], 2);
+        let column = vanilla.column(&column_of(&few)).unwrap();
+        assert_eq!(got(&column, 2), 35723);
     }
 
     /// `LevelChunk.replaceBiomes`: the packet's containers go to the

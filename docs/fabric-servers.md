@@ -37,15 +37,33 @@ server's tables replace the built-in ones for the rest of the connection (also a
 reconfiguration that doesn't sync again), as a Fabric client remaps its registries. Names
 then resolve to the mods' ids: an attribute snapshot, a menu type, a sound event.
 
-The join is refused with `horizon.multiplayer.fabric_unsupported` (the namespaces involved) when
-the server numbers a vanilla entry differently, or when a mod adds to a registry whose ids sit in
-bulk data Horizon decodes: `minecraft:block`, `minecraft:item`, `minecraft:fluid` and
-`minecraft:data_component_type` (chunk palettes and item stacks, where an unknown id breaks what
-follows). Such a server needs its content mods ported first ([modpacks.md](modpacks.md)).
+## Mod blocks, items, components and particles
 
-Not done: Fabric API's split payloads for a registry sync over 1 MiB (a server with very many
-mod entries), the attachment sync (`fabric:accepted_attachments_v1`, never asked for since
-Horizon doesn't register it), and channels of the mods themselves.
+Packets carry block states, items, data component types and particle types by raw id, inside
+chunk palettes, item stacks and particle options. A server's mods may add to those registries as
+long as all of their entries come after vanilla's (`fabric::state_ids::appended`; Fabric numbers
+them so): vanilla's ids, and vanilla's block state ids, are then exactly Horizon's, whatever the
+mods' state counts. Every id from the first mod entry on reads as unknown
+(`fabric::state_ids::Bounds`, set on the connection's thread after the sync):
+
+| What | Read as |
+|---|---|
+| A mod block's state in a chunk, a block update, a falling block, a break or brush effect | stone (`PLACEHOLDER_STATE`), so it stands and collides |
+| A mod block's state in entity data (an enderman's block) or a block particle | nothing; the particle shows stone |
+| A mod item in a stack | no item (the slot looks empty; the server keeps the real one) |
+| A stack holding a mod's data component, or a mod's particle | the packet can't be read and is skipped (no length to skip the value by); the first time, chat says `horizon.multiplayer.fabric_unreadable` |
+
+Mod block states are never another block's: Horizon's own content mods number theirs after
+vanilla too, and a server's id there is still the placeholder. The join is still refused with
+`horizon.multiplayer.fabric_unsupported` (the namespaces involved) when the server numbers a
+vanilla entry differently, lacks one, or puts a mod entry among vanilla's in one of those
+registries (`minecraft:block`, `minecraft:item`, `minecraft:fluid`,
+`minecraft:data_component_type`, `minecraft:particle_type`).
+
+Not done: drawing mod blocks as themselves (their state counts and models aren't on the wire),
+reading a mod's component values, Fabric API's split payloads for a registry sync over 1 MiB (a
+server with very many mod entries), and channels of the mods themselves. Not tested live: no
+server with block mods is in the end-to-end tool, which runs no third-party mods.
 
 ## Mods ported for every client
 
@@ -84,11 +102,8 @@ python3 tools/fabric_e2e.py --profile minimal --profile vanilla-perfected --bin-
 ```
 
 Profiles: `minimal` (Fabric Loader 0.19.5 and Fabric API 0.162.0+26.3, downloaded once into
-`.local/fabric-e2e/`, a flat world), `vanilla-perfected` (a copy of a prepared server folder,
-`--server-dir`; the source is never touched), and `modules` / `blocks` (minimal plus small Modrinth
-mods that exercise a module: Carry On for the attachment sync, Just Enough Breeding for the recipe
-sync, Scholar for extended menus, RebornCore for custom ingredients, Animal Feeding Trough for
-modded block states).
+`.local/fabric-e2e/`, a flat world) and `vanilla-perfected` (a copy of a prepared server folder,
+`--server-dir`; the source is never touched). It never downloads or runs third-party mods.
 
 Checks: joined, chunks received, the chat line and `/list` came back, no undecodable packet, no
 disconnect, the client answered `fabric:registry/sync/complete`, and one per Fabric API module

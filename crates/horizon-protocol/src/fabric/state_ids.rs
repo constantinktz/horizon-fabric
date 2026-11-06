@@ -21,8 +21,9 @@
 //! The fluid state table is rebuilt the same way, but fluid state ids never
 //! cross the network (a fluid's state rides on its block's), so only the
 //! fluid registry's own ids matter, and those are names.
-use crate::registry::Ids;
+use crate::registry::{Builtin, Ids};
 use horizon_world::registry::{BlockRegistry, BlockStateId};
+use std::cell::Cell;
 use std::collections::HashMap;
 
 /// One block's states in a state table: the first id and how many.
@@ -248,6 +249,124 @@ pub fn appended(known: &Ids, entries: &[(String, i32)]) -> Result<(), Vec<String
     }
 }
 
+/// 26.3's block state count: every vanilla block's states, in registry
+/// order (the adapter's `PINNED_STATES`; `Layout::from_report` counts the
+/// same from the block report).
+pub const VANILLA_STATES: u32 = 35723;
+
+/// What a server mod's block state shows as where a block must stand (a
+/// chunk, a block update): vanilla's stone, the facts
+/// `horizon_items::blocks::unknown_state` gives an unknown id.
+pub const PLACEHOLDER_STATE: i32 = 1;
+
+/// Where a Fabric server's mod entries start in the registries Horizon reads
+/// by raw id inside packets, once [`appended`] holds for each: vanilla's ids
+/// come first and are Horizon's, every id from the bound on is a mod's. A
+/// registry the server's mods add nothing to has no bound.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Bounds {
+    pub block_states: Option<i32>,
+    pub items: Option<i32>,
+    pub components: Option<i32>,
+    pub particles: Option<i32>,
+}
+
+impl Bounds {
+    /// The bounds a registry sync sets, `None` when the server's mods add
+    /// nothing Horizon reads by raw id. Call it after [`super::remap`]
+    /// accepted the sync: the vanilla entries are then where Horizon has them.
+    pub fn from_sync(builtin: &Builtin, synced: &[super::SyncedRegistry]) -> Option<Self> {
+        let mut bounds = Self::default();
+        for registry in synced {
+            let Some(known) = builtin.get(&registry.id) else {
+                continue;
+            };
+            if registry
+                .entries
+                .iter()
+                .all(|(name, _)| known.id(name).is_some())
+            {
+                continue;
+            }
+            let first = i32::try_from(known.names.len()).ok();
+            match registry.id.as_str() {
+                "minecraft:block" => bounds.block_states = i32::try_from(VANILLA_STATES).ok(),
+                "minecraft:item" => bounds.items = first,
+                "minecraft:data_component_type" => bounds.components = first,
+                "minecraft:particle_type" => bounds.particles = first,
+                _ => {}
+            }
+        }
+        (bounds != Self::default()).then_some(bounds)
+    }
+}
+
+thread_local! {
+    /// The bounds of the server whose packets this thread decodes.
+    static BOUNDS: Cell<Option<Bounds>> = const { Cell::new(None) };
+}
+
+/// The bounds packets on this thread are read with.
+pub fn active() -> Option<Bounds> {
+    BOUNDS.get()
+}
+
+/// Read this thread's packets with `bounds` from now on (a connection's net
+/// thread, once its registry sync is in).
+pub fn set(bounds: Option<Bounds>) {
+    BOUNDS.set(bounds);
+}
+
+/// A connection's bounds: none while it lasts until [`set`], the previous
+/// ones again when it ends.
+pub struct Scope(Option<Bounds>);
+impl Scope {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self(BOUNDS.replace(None))
+    }
+}
+impl Drop for Scope {
+    fn drop(&mut self) {
+        BOUNDS.set(self.0);
+    }
+}
+
+fn past(id: i32, bound: impl Fn(&Bounds) -> Option<i32>) -> bool {
+    BOUNDS
+        .get()
+        .and_then(|b| bound(&b))
+        .is_some_and(|first| id >= first)
+}
+
+/// An item id as read: -1 (no item Horizon has) for a server mod's.
+pub fn item(id: i32) -> i32 {
+    if past(id, |b| b.items) { -1 } else { id }
+}
+/// A data component type id as read: -1 for a server mod's, whose value no
+/// reader can skip (it has no length), so the stack holding it fails to read.
+pub fn component(id: i32) -> i32 {
+    if past(id, |b| b.components) { -1 } else { id }
+}
+/// A particle type id as read: -1 for a server mod's.
+pub fn particle(id: i32) -> i32 {
+    if past(id, |b| b.particles) { -1 } else { id }
+}
+/// A block state id as read: -1 (none) for a server mod's.
+pub fn block_state(id: i32) -> i32 {
+    if past(id, |b| b.block_states) { -1 } else { id }
+}
+/// A block state id where a block must stand: [`PLACEHOLDER_STATE`] for a
+/// server mod's. `first` is the server's first mod state, carried where the
+/// thread's bounds don't reach (chunk decoding on worker threads).
+pub fn placed_state(id: u32, first: Option<u32>) -> u32 {
+    if first.is_some_and(|first| id >= first) {
+        PLACEHOLDER_STATE as u32
+    } else {
+        id
+    }
+}
+
 fn namespace_of(name: &str) -> &str {
     name.split_once(':').map_or("minecraft", |(ns, _)| ns)
 }
@@ -255,6 +374,175 @@ fn namespace_of(name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synced(id: &str, names: &[&str]) -> super::super::SyncedRegistry {
+        super::super::SyncedRegistry {
+            id: id.into(),
+            optional: false,
+            entries: names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| ((*n).to_owned(), i as i32))
+                .collect(),
+        }
+    }
+
+    fn small_builtin() -> Builtin {
+        Builtin::parse(
+            r#"{
+                "minecraft:block": {"entries": {
+                    "minecraft:air": {"protocol_id": 0},
+                    "minecraft:stone": {"protocol_id": 1}
+                }},
+                "minecraft:item": {"entries": {
+                    "minecraft:air": {"protocol_id": 0},
+                    "minecraft:stone": {"protocol_id": 1},
+                    "minecraft:diamond": {"protocol_id": 2}
+                }},
+                "minecraft:data_component_type": {"entries": {
+                    "minecraft:custom_data": {"protocol_id": 0}
+                }},
+                "minecraft:particle_type": {"entries": {
+                    "minecraft:angry_villager": {"protocol_id": 0}
+                }}
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bounds_start_where_the_mods_entries_do() {
+        let builtin = small_builtin();
+        // Nothing of the mods' where packets carry raw ids: no bounds.
+        let plain = [synced(
+            "minecraft:item",
+            &["minecraft:air", "minecraft:stone", "minecraft:diamond"],
+        )];
+        assert_eq!(Bounds::from_sync(&builtin, &plain), None);
+        let modded = [
+            synced(
+                "minecraft:block",
+                &["minecraft:air", "minecraft:stone", "copper_age:vent"],
+            ),
+            synced(
+                "minecraft:item",
+                &[
+                    "minecraft:air",
+                    "minecraft:stone",
+                    "minecraft:diamond",
+                    "copper_age:wrench",
+                ],
+            ),
+            synced(
+                "minecraft:data_component_type",
+                &["minecraft:custom_data", "copper_age:charge"],
+            ),
+            synced("minecraft:particle_type", &["minecraft:angry_villager"]),
+        ];
+        assert_eq!(
+            Bounds::from_sync(&builtin, &modded),
+            Some(Bounds {
+                // Every vanilla block's states come first, whatever the mods'.
+                block_states: Some(35723),
+                items: Some(3),
+                components: Some(1),
+                particles: None,
+            })
+        );
+    }
+
+    #[test]
+    fn ids_past_a_bound_read_as_unknown_on_the_connections_thread() {
+        let bounds = Bounds {
+            block_states: Some(35723),
+            items: Some(1012),
+            components: Some(100),
+            particles: Some(120),
+        };
+        assert_eq!(item(1012), 1012);
+        {
+            let _connection = Scope::new();
+            set(Some(bounds));
+            assert_eq!((item(1011), item(1012)), (1011, -1));
+            assert_eq!((component(99), component(100)), (99, -1));
+            assert_eq!((particle(119), particle(120)), (119, -1));
+            assert_eq!((block_state(35722), block_state(35723)), (35722, -1));
+            // Through the readers' own path (`adapter::ids`).
+            assert_eq!(crate::adapter::ids::block_state(40000), -1);
+            assert_eq!(crate::adapter::ids::item(5), 5);
+            {
+                let _next = Scope::new();
+                assert_eq!(item(1012), 1012);
+            }
+            assert_eq!(item(1012), -1);
+        }
+        assert_eq!(item(1012), 1012);
+    }
+
+    #[test]
+    fn a_stack_of_a_mod_item_has_no_item_and_a_mod_component_stops_the_read() {
+        use crate::buf::{Codec, Reader};
+        use crate::item::Slot;
+        let _connection = Scope::new();
+        set(Some(Bounds {
+            items: Some(1012),
+            components: Some(100),
+            ..Bounds::default()
+        }));
+        // ItemStack.OPTIONAL_STREAM_CODEC: count 2, item 1012 (VarInt f4 07),
+        // no components added or removed.
+        let stack = Slot::read(&mut Reader::new(&[2, 0xf4, 0x07, 0, 0]))
+            .unwrap()
+            .unwrap();
+        assert_eq!((stack.item, stack.count), (-1, 2));
+        // Count 1, item 5, one component added: type 100 (VarInt 64), whose
+        // value has no length to skip it by.
+        assert!(Slot::read(&mut Reader::new(&[1, 5, 1, 0, 0x64, 0x01])).is_err());
+    }
+
+    #[test]
+    fn a_mod_particle_is_an_error_not_a_native_mods_or_a_dataless_one() {
+        use crate::buf::{Reader, Writer};
+        use crate::entity_data::{Particle, ParticleData};
+        let _connection = Scope::new();
+        set(Some(Bounds {
+            particles: Some(120),
+            ..Bounds::default()
+        }));
+        // Type 120 (VarInt 78) and two bytes of a shape only its mod knows.
+        assert!(Particle::read(&mut Reader::new(&[0x78, 0x01, 0x02])).is_err());
+        // Horizon's own native-mod sentinel still reads its name.
+        let mut w = Writer::new();
+        w.varint(-1);
+        w.string("starfall:spark");
+        let native = Particle::read(&mut Reader::new(&w.data)).unwrap();
+        assert_eq!(
+            native.data,
+            Some(ParticleData::Mod("starfall:spark".into()))
+        );
+    }
+
+    #[test]
+    fn a_placed_mod_state_is_stone() {
+        assert_eq!(placed_state(35722, Some(35723)), 35722);
+        assert_eq!(placed_state(35723, Some(35723)), 1);
+        assert_eq!(placed_state(u32::MAX, Some(35723)), 1);
+        assert_eq!(placed_state(40000, None), 40000);
+    }
+
+    #[test]
+    fn vanilla_states_match_the_block_report() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/datagen/out/reports/blocks.json");
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let report: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            Layout::from_report(&report).unwrap().total(),
+            VANILLA_STATES
+        );
+    }
 
     /// The first 14 blocks of 26.3's block report
     /// (`.local/datagen/out/reports/blocks.json`), copied by hand:

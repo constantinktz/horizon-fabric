@@ -20,13 +20,12 @@ Profiles (`--profile`, repeatable, run one after the other):
   Perfected copy with 41 mods). The source folder is never touched.
 - `minimal`: Fabric Loader 0.19.5 + Fabric API 0.162.0+26.3 for 26.3, downloaded once into
   `.local/fabric-e2e/` (Fabric meta API, Modrinth, sha512-checked), a flat world.
-- `modules`: `minimal` plus small real mods that exercise the attachment sync, recipe sync and extended
-  menus but add no blocks or items (MODULE_MODS).
-- `blocks`: `minimal` plus a small mod that adds a block (modded state ids): Horizon refuses it until
-  those are ported, which the state_ids check reports as "unsupported".
+
+It never downloads or runs third-party mods: only Fabric's own loader and Fabric API, or a server folder
+you prepared yourself.
 
     python3 tools/fabric_e2e.py --profile minimal --profile vanilla-perfected
-    python3 tools/fabric_e2e.py --profile modules --bin-dir target/fast --keep
+    python3 tools/fabric_e2e.py --profile minimal --bin-dir target/fast --keep
 
 Every process it starts is stopped when it ends (also on Ctrl-C). The game runs with fresh HORIZON_HOME,
 launcher and XDG folders and without audio. It prints one JSON summary per run (and a list of them for
@@ -66,24 +65,6 @@ PLAYER = 'HorizonE2E'
 CHAT = 'hello from the fabric e2e'
 VANILLA_PERFECTED = Path('/Users/constantinkautz/.claude/jobs/324f7c35/tmp/vpserver')
 USER_AGENT = 'horizon-fabric-e2e (github.com/horizon-rust/horizon)'
-
-# Small real Fabric 26.3 mods that exercise a module (found by scanning the 800 most downloaded 26.3 Fabric
-# mods on Modrinth for the module's API classes, see MARKERS), per profile; downloaded into the cache only for
-# that profile, with their required dependencies. slug: (check, why). The `modules` ones add no block or item
-# (Horizon refuses those registries). No small mod makes a payload large enough to be split (registerLarge is
-# only called by libraries: frozenlib, libjf), and Fabric API's own particle mixins cover the particles.
-MODULE_MODS = {
-    'modules': {
-        'carry-on': ('attachment_sync', 'CarryOnFabricMod registers a player attachment synced to clients'),
-        'justenoughbreeding': ('recipe_sync', 'JustEnoughBreeding calls RecipeSynchronization for its recipes'),
-        'scholar': ('menu', 'opens its book screens through an ExtendedMenuType'),
-        'reborncore': ('ingredient_sync', 'registers Fabric custom ingredient serializers'),
-    },
-    # Mods that add blocks: Horizon refuses their servers until modded state ids are ported.
-    'blocks': {
-        'animal_feeding_trough': ('state_ids', 'adds a feeding trough block (minecraft:block, its states)'),
-    },
-}
 
 # What in a mod's classes or data shows it uses a module (constant-pool strings of the Fabric API
 # classes it calls). Fabric API's own jar is not scanned for these: it carries every module.
@@ -432,8 +413,7 @@ def prepare(profile, scratch, server_dir=None):
             elif (runtime / part).is_file():
                 shutil.copy(runtime / part, folder / part)
         (folder / 'mods').mkdir()
-        slugs = ['fabric-api'] + list(MODULE_MODS.get(profile, {}))
-        for jar in mod_jars(slugs):
+        for jar in mod_jars(['fabric-api']):
             shutil.copy(jar, folder / 'mods' / jar.name)
         properties = dict(PROPERTIES, **MINIMAL_PROPERTIES)
     port = pick_port(PORTS, port_is_free)
@@ -618,7 +598,7 @@ def run_profile(profile, args, binary):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--profile', action='append', choices=['vanilla-perfected', 'minimal', *MODULE_MODS],
+    parser.add_argument('--profile', action='append', choices=['vanilla-perfected', 'minimal'],
                         help='repeatable (default: minimal)')
     parser.add_argument('--server-dir', help=f'the folder vanilla-perfected copies (default {VANILLA_PERFECTED})')
     parser.add_argument('--bin-dir', help='a prebuilt horizon-client (default: build it with the fast profile)')

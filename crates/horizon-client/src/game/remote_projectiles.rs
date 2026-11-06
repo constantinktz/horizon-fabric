@@ -361,7 +361,7 @@ impl Game<'_> {
             "minecraft:falling_block" => self.falling.push(FallingBlock {
                 join: Default::default(),
                 id,
-                state: BlockStateId(data.max(0) as u32),
+                state: BlockStateId(self.placed_state(data)),
                 start_pos: BlockPos::default(),
                 position: at,
                 previous: at,

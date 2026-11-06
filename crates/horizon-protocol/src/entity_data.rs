@@ -184,18 +184,19 @@ pub enum PositionSource {
 }
 impl Particle {
     pub fn read(r: &mut Reader) -> Result<Particle> {
-        let id = r.varint()?;
-        let id = if id == MOD_PARTICLE_ID {
-            id
-        } else {
-            ids::particle(id)
-        };
+        let sent = r.varint()?;
         // A native mod's type: the namespaced name follows the sentinel id.
-        if id == MOD_PARTICLE_ID {
+        if sent == MOD_PARTICLE_ID {
             return Ok(Particle {
-                id,
+                id: sent,
                 data: Some(ParticleData::Mod(r.string(32767)?)),
             });
+        }
+        // A type Horizon lacks (a Fabric server mod's, an older server's)
+        // has data of a shape no one here knows: what follows can't be read.
+        let id = ids::particle(sent);
+        if id < 0 {
+            return Err(crate::Error::new(format!("unknown particle type {sent}")));
         }
         // `minecraft:particle_type` registry order as of 26.3.
         let data = match id {

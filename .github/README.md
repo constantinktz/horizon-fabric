@@ -13,7 +13,7 @@ upstream README is [here](../README.md).
 | Fabric API module | What Horizon does | Code |
 |---|---|---|
 | networking-api-v1 | `minecraft:register`, `c:version`, `c:register` in configuration and play; Fabric's packet splitter for oversized payloads | `crates/horizon-protocol/src/fabric/{mod,splitter}.rs`, `splitter/channels.rs` |
-| registry-sync-v0 | takes the server's id tables (mod attributes, menus ...); block state id rebuild (`StateIdTracker`); unknown block state ids no longer panic | `fabric/mod.rs`, `fabric/state_ids.rs`, `horizon-items/src/blocks.rs` |
+| registry-sync-v0 | takes the server's id tables (mod attributes, menus, blocks, items ...); block state ids as `StateIdTracker` rebuilds them; every mod id past vanilla's reads as unknown, never as another block or item; unknown block state ids no longer panic | `fabric/mod.rs`, `fabric/state_ids.rs`, `horizon-items/src/blocks.rs` |
 | menu-api-v1 | `open_screen` for extended menus; a mod menu shaped like a chest or hopper opens as one, others close cleanly | `fabric/menu.rs`, `game/remote_fabric_menu.rs` |
 | particles-v1 | the extended block particle option (block position for the tint) | `fabric/particles.rs`, `entity_data.rs` |
 | recipe-api-v1 | custom ingredient and recipe sync answered (Horizon claims none, so the server sends vanilla data) | `fabric/{ingredient,recipe}.rs` |
@@ -23,9 +23,10 @@ upstream README is [here](../README.md).
 **Mods:** Horizon ports of Fabric mods live in [`fabric-mods/`](../fabric-mods), one folder per mod, with their files
 on [Releases](https://github.com/constantinktz/horizon-fabric/releases).
 
-Still refused: servers whose mods add blocks or data component types (their state counts and payloads aren't on
-the wire). The details, and what each module still lacks: [docs/fabric-servers.md](../docs/fabric-servers.md),
-[docs/fabric-api.md](../docs/fabric-api.md).
+Servers whose mods add blocks, items, components or particles can be joined: mod blocks stand as stone, mod items
+show as empty, and a packet holding a mod's component or particle is skipped (their contents aren't on the wire in a
+form Horizon can read). The details, and what each module still lacks:
+[docs/fabric-servers.md](../docs/fabric-servers.md), [docs/fabric-api.md](../docs/fabric-api.md).
 
 ## Build and test
 
